@@ -23,6 +23,7 @@ class DASCO_Output(ModelOutput):
     loss_cl: Optional[torch.FloatTensor] = None
     n_correct: Optional[torch.LongTensor] = None
     n_pred: Optional[torch.LongTensor] = None
+    n_label: Optional[torch.LongTensor] = None
     span_prob: torch.FloatTensor = None
     span_logits: torch.FloatTensor = None
     start_prob: torch.FloatTensor = None
@@ -306,8 +307,6 @@ class DASCO(nn.Module):
         h1 = self.projection(H_l)
         h2 = self.projection(I_sem)  #[B,s,D/2]
 
-        
-
         l1 = self.scope_semi_loss_list(h1, h2, samples['nouns_scope'], samples['nouns_mask'])
         l2 = self.scope_semi_loss_list(h2, h1, samples['nouns_scope'], samples['nouns_mask'])  # B, Seq
         loss = (l1 + l2) * 0.5
@@ -315,12 +314,11 @@ class DASCO(nn.Module):
         loss_target = 0
         n_correct = 0
         n_pred = 0
+        n_label = 0
         for i in range(len(samples['nouns_mask'])):
             asp_wn_ori = samples['nouns_mask'][i].sum(dim=-1).unsqueeze(-1) # [N,1]
             asp_wn_ori = torch.clamp(asp_wn_ori, min=1.0)
-            # asp_wn.append(asp_wn_ori)
             n_mask_ori = samples['nouns_mask'][i].unsqueeze(-1).repeat(1, 1, self.hidden_size // 2)  # [N,S,D/2]
-            # n_mask.append(n_mask_ori)
             
             # 目标: 使h1.i和h2.i变为[1,S,D/2]以便与[N,S,D/2]的n_mask进行广播
             h1_expanded = h1[i].unsqueeze(0)  # [1, S, D/2]
@@ -339,19 +337,18 @@ class DASCO(nn.Module):
             # 合并三个输出
             final_outputs = torch.cat((outputs1, outputs2, pooled_output[i].repeat(outputs2.size(0), 1)), dim=-1)
             logits = self.classifier(final_outputs)  # [N, 2]
-
             loss_target += self.criterion(logits, samples['noun_targets'][i])
-
-            valid_indices = torch.where(samples['noun_targets'][i]  == 1)[0]
-            filtered_logits = logits[valid_indices]
-            filtered_targets = samples['noun_targets'][i][valid_indices]
-            n_correct += (torch.argmax(filtered_logits,  -1) == filtered_targets).sum().item()
-            n_pred += torch.sum(torch.argmax(logits,  -1) == 1).item()
+            
+            labels = samples['noun_targets'][i]
+            probs = torch.softmax(logits, dim=-1)
+            predictions = torch.argmax(probs, dim=-1)
+            n_correct += torch.sum((predictions == labels) & (labels == 1)).item()
+            n_pred += torch.sum(predictions == 1).item()
+            n_label += torch.sum(labels == 1).item()
         
-
         loss_cl = loss_avg.mean()
         loss_classify = loss_target.mean()
-        loss_cls_cl = loss_classify + self.hyper3 * loss_cl
+        loss_cls_cl = loss_classify +  self.hyper3 * loss_cl
 
         total_loss = (self.itc_weight * PQformer_outputs.loss_itc
                       + self.itm_weight * PQformer_outputs.loss_itm
@@ -366,7 +363,8 @@ class DASCO(nn.Module):
             loss_itc=PQformer_outputs.loss_itc,
             loss_lm=PQformer_outputs.loss_lm,
             n_correct = n_correct,
-            n_pred = n_pred
+            n_pred = n_pred,
+            n_label = n_label
             # span_prob=self.sigmoid(logits),
             # span_logits=logits
         )

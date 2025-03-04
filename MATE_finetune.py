@@ -36,8 +36,8 @@ def save_checkpoint(state, save_path, step):
     accelerator.save(state, save_dir)
 
 def compute_metric(total_correct,total_label,total_pred):
-    precision = total_correct / total_pred if total_correct & total_pred!= 0 else 0.0
-    recall=total_correct/total_label if total_correct & total_label!= 0 else 0.0
+    precision = total_correct / total_pred if total_correct  else 0.0
+    recall=total_correct/total_label if total_correct else 0.0
     f1=(2 * (precision * recall) / (precision + recall)) if total_correct else 0.0
     return precision,recall,f1
     
@@ -222,6 +222,11 @@ if __name__ == "__main__":
     model.itm_weight=args.itm
     model.lm_weight=args.lm
     model.cl_weight=args.cl
+
+    for param in model.pdq.parameters():
+        param.requires_grad=False
+    for param in model.text_encoder.parameters():
+        param.requires_grad=False
 
     optimizer = AdamW(params=filter(lambda p: p.requires_grad, model.parameters()),
                 lr=args.lr, betas=(0.9, 0.98), weight_decay=0.05)

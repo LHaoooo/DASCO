@@ -53,28 +53,11 @@ def eval_MATE(model,dataloader,limit=0.5,device='cpu'):
 
             with maybe_autocast(model):
                 with torch.no_grad():
-                    b=batch["query_inputs"].size()[0]
                     output = model(batch,no_its_and_itm=True)
-                    start_ids=batch["start_ids"].float()
-                    end_ids=batch["end_ids"].float()
-                    # print(output.start_prob)
-                    # span_pred=output.span_prob.float()
-                    # span_pred[span_pred<limit]=0
-                    # texts=batch["IE_inputs"]['input_ids']
 
-            for i in range(b):
-                start_ids_list=torch.nonzero(start_ids[i])
-                end_ids_list=torch.nonzero(end_ids[i])
-                ids_spans=get_span_for_eval(start_ids_list,end_ids_list)
-                # pred_spans=get_span_for_eval_2d(span_pred[i])
-                total_label+=len(ids_spans)
-                # total_pred+=len(pred_spans)
-
-                # for span in pred_spans:
-                #     if span in ids_spans:
-                #         total_correct+=1 
             total_correct += output.n_correct
             total_pred += output.n_pred
+            total_label += output.n_label
     
     model.train()
     return torch.tensor(total_correct).to(device),torch.tensor(total_label).to(device),torch.tensor(total_pred).to(device)

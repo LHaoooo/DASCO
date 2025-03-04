@@ -7,14 +7,14 @@ accelerate launch --config_file deepspeed_ddp.json MATE_finetune.py \
     --eval_ds /home/data/finetune_dataset/twitter15/dev_data \
     --lr 2e-5 \
     --seed 1000 \
-    --itc 0.1 \
-    --itm 0.1 \
-    --lm  0.1 \
+    --itc 0 \
+    --itm 0 \
+    --lm  0 \
     --cl  1.0 \
     --save_path ./checkpoints/MATE_2015_0 \
     --epoch 20 \
     --log_step 1 \
-    --save_step 300 \
-    --batch_size 4 \
+    --save_step 500 \
+    --batch_size 16 \
     --accumulation_steps 2 \
-    --val_step 100
+    --val_step 10
