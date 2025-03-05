@@ -5,11 +5,12 @@ sys.path.append('Text_encoder')
 sys.path.append('PDQ')
 from torch.utils.data import Dataset, DataLoader
 import torch
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 from transformers import BertTokenizer
 import pdb
 from tqdm import tqdm
 from PIL import Image
-import os
 import os.path as osp
 import pickle
 import random
@@ -30,8 +31,15 @@ def get_span(target,input_ids,tokenizer):
     end_pos = []
     for i in range(len(input_ids_list)-tgt_token_len+1):
         if input_ids_list[i:i+tgt_token_len] == tgt_tokens:
-            start_pos.append(i)
-            end_pos.append(i + tgt_token_len - 1)
+            is_subword = False
+            #  检测下一个 token 是否是子词
+            if i + tgt_token_len < len(input_ids_list):
+                next_token = tokenizer.convert_ids_to_tokens(input_ids_list[i  + tgt_token_len])
+                # 判断规则：Hugging Face 风格子词（##）、SentencePiece 风格（▁）
+                is_subword = next_token.startswith(('##',  '▁'))
+            if not is_subword:
+                start_pos.append(i)
+                end_pos.append(i + tgt_token_len - 1)
     return start_pos,end_pos
 
 class Tree(object):
@@ -190,17 +198,11 @@ def ParseData(data, max_seq_len, left_len):
         aspect_post = [int(aspect['from']), int(aspect['to'])]
         # label = polar_dict[aspect['polarity']]
         label = 1  # 此处有问题
-        
+        id_b, id_e = aspect_post
         s_b,s_e = aspect['scope']
-        aspect_scope = [0]*s_b + [1]*(s_e - s_b + 1) + [0]*(length - s_e -1)
-        if len(aspect_scope) != length:
-            if len(aspect_scope) < length:
-                aspect_scope = aspect_scope + [0]*(length - len(aspect_scope))
-            else:
-                aspect_scope = aspect_scope[:length]
+        aspect_scope = [id_b - s_b, s_e - id_e]  # 表示左右各有几个词包含在scope中
 
-        assert len(aspect_scope) == length, f"Scope length {len(aspect_scope)} doesn't match expected length {length}"
-        aspect_sample = {'aspect': asp, 'aspect_post': aspect_post, 'label': label, 'span_mask': aspect_scope}
+        aspect_sample = {'aspect': asp, 'aspect_post': aspect_post, 'label': label, 'aspect_scope': aspect_scope}
         aspects_item.append(aspect_sample)
     
     nouns_item = []
@@ -211,25 +213,10 @@ def ParseData(data, max_seq_len, left_len):
 
         term_post = [int(noun['from']), int(noun['to'])]
         id_b, id_e = term_post
-        n_mask = [0]*id_b + [1]*(id_e - id_b + 1) + [0]*(length - id_e -1)
-        
-        if len(n_mask) != length:
-            if len(n_mask) < length:
-                n_mask = n_mask + [0]*(length- len(n_mask))
-            else:
-                n_mask = n_mask[:length]
-
         t_b,t_e = noun['scope']
-        noun_scope = [0]*t_b + [1]*(t_e - t_b + 1) + [0]*(length - t_e -1)
+        boundary_scope = [id_b - t_b, t_e - id_e]  # 表示左右各有几个词包含在scope中
 
-        if len(noun_scope) != length:
-            if len(noun_scope) < length:
-                noun_scope = noun_scope + [0]*(length - len(noun_scope))
-            else:
-                noun_scope = noun_scope[:length]
-
-        assert len(noun_scope) == length, f"Scope length {len(noun_scope)} doesn't match expected length {length}"
-        noun_sample = {'term': term, 'term_post': term_post, 'noun_mask': n_mask, 'noun_target': noun_target, 'noun_scope': noun_scope}
+        noun_sample = {'term': term, 'term_post': term_post, 'noun_target': noun_target, 'boundary_scope': boundary_scope}
         nouns_item.append(noun_sample)
 
     sample = {'text_list': text_list, 'text': tok, 'length': length, 'pos': pos, 'head': head, 'deprel': deprel, 
@@ -376,6 +363,10 @@ class twitter_dataset(Dataset):
             for end_pos in end_pos_list:
                 end_ids[end_pos+self.num_query_token] = 1
 
+        prompt_length_stoken = calculate_cls_sep_length(IE_inputs, self.IE_tokenizer)
+        left_tokens_len = self.num_query_token + prompt_length_stoken
+        parse_info = ParseData(self.data[index], self.max_seq_len, left_tokens_len)
+        
         # aspect mask for each aspect
         aspects_mask = []
         if isinstance(self.data[index]["target"],list):
@@ -385,8 +376,7 @@ class twitter_dataset(Dataset):
                                             input_ids=IE_inputs["input_ids"],
                                             tokenizer=self.IE_tokenizer)
                 for j in range(len(start_pos_list)):
-                    if (not aspect_mask[start_pos_list[j]+self.num_query_token]==1) and (not aspect_mask[end_pos_list[j]+self.num_query_token]==1):
-                        aspect_mask[start_pos_list[j]+self.num_query_token:end_pos_list[j]+self.num_query_token+1]=1
+                    aspect_mask[start_pos_list[j]+self.num_query_token:end_pos_list[j]+self.num_query_token+1]=1
                 aspects_mask.append(aspect_mask)
         else:
             aspect_mask = torch.zeros(self.max_seq_len).int()
@@ -396,43 +386,90 @@ class twitter_dataset(Dataset):
             for start_pos, end_pos in zip(start_pos_list, end_pos_list): 
                 aspect_mask[start_pos+self.num_query_token:end_pos+self.num_query_token+1]=1 
             aspects_mask.append(aspect_mask)
+        aspects_mask = torch.stack(aspects_mask, dim=0)
 
-        prompt_length_stoken = calculate_cls_sep_length(IE_inputs, self.IE_tokenizer)
-        left_tokens_len = self.num_query_token + prompt_length_stoken
-        parse_info = ParseData(self.data[index], self.max_seq_len, left_tokens_len)
-        
-        # 此处有问题，一个item有多个aspect scope和多个noun scope，但现在只假定有一个
         # aspect scope mask for each aspect
         aspects_scope = []
+        text_tokens = parse_info['text_list']
         for aspect_item in parse_info['aspects_item']:
-            span = aspect_item['span_mask']
-            span_mask = torch.zeros(self.max_seq_len).int()
-            span_mask[left_tokens_len : parse_info['length'] + left_tokens_len] = torch.tensor(span, dtype=torch.int) 
-            aspects_scope.append(span_mask) 
-        aspects_scope = torch.stack(aspects_scope, dim=0)
+            aspect_tokens = aspect_item['aspect'].split()
+            text_lower = [x.lower() for x in text_tokens]
+            
+            phrase_start = None 
+            for i in range(len(text_lower) - len(aspect_tokens) + 1):
+                if text_lower[i:i+len(aspect_tokens)] == aspect_tokens:
+                    phrase_start = i 
+                    break 
+            if phrase_start is None:
+                continue  # 未找到匹配项 
+            phrase_end = phrase_start + len(aspect_tokens) - 1
+
+            i, j = aspect_item['aspect_scope']
+            safe_left = max(0, phrase_start - i)
+            safe_right = min(len(text_tokens)-1, phrase_end + j)
+
+            aspect_scope = torch.zeros(self.max_seq_len,  dtype=torch.int) 
+            # 合并所有相关词元的token位置 
+            for idx in range(safe_left, safe_right + 1):
+                word = text_tokens[idx]
+                start_pos_list,end_pos_list = get_span(
+                                                target=word,
+                                                input_ids=IE_inputs["input_ids"],
+                                                tokenizer=self.IE_tokenizer 
+                                            )
+                for j in range(len(start_pos_list)):
+                    if end_pos_list[j]+self.num_query_token>=self.max_seq_len:
+                        continue 
+                    aspect_scope[start_pos_list[j]+self.num_query_token: end_pos_list[j]+self.num_query_token+1]=1
+            aspects_scope.append(aspect_scope)
+        # aspects_scope = torch.stack(aspects_scope, dim=0)
 
         # nouns mask for each noun
         nouns_mask = []
         for noun_item in parse_info['nouns_item']:
-            n_mask = noun_item['noun_mask']
             noun_mask = torch.zeros(self.max_seq_len).int()
-            noun_mask[left_tokens_len : parse_info['length'] + left_tokens_len]= torch.tensor(n_mask, dtype=torch.int)
-            # 下面这种写法和noun scope对不上，按道理noun scope要包含noun mask
-            # start_pos_list,end_pos_list=get_span(target=noun_item['term'],
-            #                             input_ids=IE_inputs["input_ids"],
-            #                             tokenizer=self.IE_tokenizer)
-            # for start_pos, end_pos in zip(start_pos_list, end_pos_list): 
-            #     noun_mask[start_pos+self.num_query_token:end_pos+self.num_query_token+1]=1
+            start_pos_list,end_pos_list=get_span(target=noun_item['term'],
+                                            input_ids=IE_inputs["input_ids"],
+                                            tokenizer=self.IE_tokenizer)
+            for j in range(len(start_pos_list)):
+                noun_mask[start_pos_list[j]+self.num_query_token: end_pos_list[j]+self.num_query_token+1]=1
             nouns_mask.append(noun_mask)
         nouns_mask = torch.stack(nouns_mask, dim=0)
 
         # nouns scope mask for each noun
         nouns_scope = []
+        text_tokens = parse_info['text_list']
         for noun_item in parse_info['nouns_item']:
-            n_scope = noun_item['noun_scope']
-            noun_span_mask = torch.zeros(self.max_seq_len).int()
-            noun_span_mask[left_tokens_len : parse_info['length'] + left_tokens_len] = torch.tensor(n_scope, dtype=torch.int)
-            nouns_scope.append(noun_span_mask)
+            term_tokens = noun_item['term'].split()
+            text_lower = [x.lower() for x in text_tokens]
+            
+            phrase_start = None 
+            for i in range(len(text_lower) - len(term_tokens) + 1):
+                if text_lower[i:i+len(term_tokens)] == term_tokens:
+                    phrase_start = i 
+                    break 
+            if phrase_start is None:
+                continue  # 未找到匹配项 
+            phrase_end = phrase_start + len(term_tokens) - 1
+
+            i, j = noun_item['boundary_scope']
+            safe_left = max(0, phrase_start - i)
+            safe_right = min(len(text_tokens)-1, phrase_end + j)
+
+            noun_scope = torch.zeros(self.max_seq_len,  dtype=torch.int) 
+            # 合并所有相关词元的token位置 
+            for idx in range(safe_left, safe_right + 1):
+                word = text_tokens[idx]
+                start_pos_list,end_pos_list = get_span(
+                                                target=word,
+                                                input_ids=IE_inputs["input_ids"],
+                                                tokenizer=self.IE_tokenizer 
+                                            )
+                for j in range(len(start_pos_list)):
+                    if end_pos_list[j]+self.num_query_token>=self.max_seq_len:
+                        continue 
+                    noun_scope[start_pos_list[j]+self.num_query_token: end_pos_list[j]+self.num_query_token+1]=1 
+            nouns_scope.append(noun_scope)
         nouns_scope = torch.stack(nouns_scope, dim=0)
 
         # adj_matrix
@@ -446,7 +483,6 @@ class twitter_dataset(Dataset):
         noun_targets = torch.tensor(noun_targets)
 
         res=[image_feature, query_inputs, scene_graph, IE_inputs, start_ids, end_ids, aspects_mask, aspects_scope, nouns_mask, nouns_scope, adj_matrix, noun_targets]
-        # res=[image_feature, query_inputs, answer_inputs, IE_inputs, start_ids, end_ids]
 
         # label
         if self.with_label:
@@ -523,3 +559,113 @@ def collate_fn(batch):
         sample["prompt_mask"]=prompt_mask
     
     return sample
+
+
+if __name__=="__main__":
+    import os
+    os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+    PQ_tokenizer=BertTokenizer.from_pretrained("bert-base-uncased")
+    IE_tokenizer=BertTokenizer.from_pretrained("./Text_encoder/model_best")
+    with open('/home/data/finetune_dataset/twitter15/dev_data/dev.pkl', 'rb') as f:
+        loaded_data = pickle.load(f)
+    # print(loaded_data[0]['nouns'])
+    
+    eval_ds= twitter_dataset(
+                    data_path="/home/data/finetune_dataset/twitter15/dev_data",
+                    max_seq_len=512,
+                    IE_tokenizer=IE_tokenizer,
+                    PQ_former_tokenizer=PQ_tokenizer,
+                    num_query_token=32,
+                    SEP_token_id=2,
+                    split_token_id=187284,
+                    set_size=3)
+    eval_ds.update_data()
+    eval_dataloader=DataLoader(eval_ds,batch_size=20,collate_fn=collate_fn)
+    
+    # for i,batch in enumerate(eval_dataloader):
+    #     # print(loaded_data[i]['nouns'])
+    #     query_ids = batch['query_inputs']
+    #     input_ids = torch.cat([query_ids,  batch['IE_inputs']['input_ids']], dim=1)[0]
+    #     # print(IE_tokenizer.decode(input_ids))
+    #     noun_mask = batch['nouns_mask'][0][0]
+    #     noun_scope = batch['nouns_scope'][0][0]
+
+    #     valid_ids = [j for j, mask in zip(input_ids, noun_mask) if mask == 1]
+    #     tokens = IE_tokenizer.convert_ids_to_tokens(valid_ids)
+    #     print(tokens)
+    #     scope_ids = [j for j, mask in zip(input_ids, noun_scope) if mask == 1]
+    #     scopes = IE_tokenizer.convert_ids_to_tokens(scope_ids)
+    #     print(scopes)
+
+    #     merged_tokens = []
+    #     current_token = ""
+    #     for token in tokens:
+    #         if token.startswith("##"): 
+    #             current_token += token[2:]
+    #         else:
+    #             if current_token:
+    #                 merged_tokens.append(current_token) 
+    #             current_token = token 
+    #     merged_tokens.append(current_token)
+    #     output_tokens = " ".join(merged_tokens)
+    #     print(f"noun: 最终输出 -> {output_tokens}")
+
+    #     scope_tokens = []
+    #     current_token = ""
+    #     for token in scopes:
+    #         if token.startswith("##"): 
+    #             current_token += token[2:]
+    #         else:
+    #             if current_token:
+    #                 scope_tokens.append(current_token) 
+    #             current_token = token 
+    #     scope_tokens.append(current_token)
+    #     output_tokens = " ".join(scope_tokens)
+    #     print(f"scope: 最终输出 -> {output_tokens}")
+
+    #     if i == 19:
+    #         break
+
+    for i,batch in enumerate(eval_dataloader):
+        # print(loaded_data[i]['nouns'])
+        query_ids = batch['query_inputs']
+        input_ids = torch.cat([query_ids,  batch['IE_inputs']['input_ids']], dim=1)[0]
+        # print(IE_tokenizer.decode(input_ids))
+        aspect_mask = batch['aspects_mask'][0][0]
+        aspect_scope = batch['aspects_scope'][0][0]
+
+        valid_ids = [j for j, mask in zip(input_ids, aspect_mask) if mask == 1]
+        tokens = IE_tokenizer.convert_ids_to_tokens(valid_ids)
+        print(tokens)
+        scope_ids = [j for j, mask in zip(input_ids, aspect_scope) if mask == 1]
+        scopes = IE_tokenizer.convert_ids_to_tokens(scope_ids)
+        print(scopes)
+
+        merged_tokens = []
+        current_token = ""
+        for token in tokens:
+            if token.startswith("##"): 
+                current_token += token[2:]
+            else:
+                if current_token:
+                    merged_tokens.append(current_token) 
+                current_token = token 
+        merged_tokens.append(current_token)
+        output_tokens = " ".join(merged_tokens)
+        print(f"noun: 最终输出 -> {output_tokens}")
+
+        scope_tokens = []
+        current_token = ""
+        for token in scopes:
+            if token.startswith("##"): 
+                current_token += token[2:]
+            else:
+                if current_token:
+                    scope_tokens.append(current_token) 
+                current_token = token 
+        scope_tokens.append(current_token)
+        output_tokens = " ".join(scope_tokens)
+        print(f"scope: 最终输出 -> {output_tokens}")
+
+        if i == 19:
+            break

@@ -98,7 +98,7 @@ class MultiHeadAttention(nn.Module):
         attn = attention(query, key, mask=mask, dropout=self.dropout)
         return attn
 
-class DASCO(nn.Module):
+class DQPSA(nn.Module):
     def __init__(self, args, MFSUIE_config):
         super().__init__()
         self.pdq = PDQ()
@@ -383,7 +383,7 @@ def from_pretrained(path, args):
         "rand_seed": 0,
         "lr": 5e-5
     }
-    model = DASCO(args, pretrain_config)
+    model = DQPSA(args, pretrain_config)
     checkpoint = torch.load(path, map_location='cpu')
     model.load_state_dict(checkpoint, strict=False)
     print(f"loading model finished from {path}")
