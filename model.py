@@ -417,18 +417,10 @@ class DASCO(nn.Module):
             
             labels = samples['aspect_targets'][i].to(h1.device)
             predictions = torch.argmax(logits, dim=-1)
-            # POS
-            n_correct += torch.sum((predictions == labels) & (labels == 2)).item()
-            n_pred += torch.sum(predictions == 2).item()
-            n_label += torch.sum(labels == 2).item()
-            # NEU
-            n_correct += torch.sum((predictions == labels) & (labels == 1)).item()
-            n_pred += torch.sum(predictions == 1).item()
-            n_label += torch.sum(labels == 1).item()
-            # NEG
-            n_correct += torch.sum((predictions == labels) & (labels == 0)).item()
-            n_pred += torch.sum(predictions == 0).item()
-            n_label += torch.sum(labels == 0).item()
+
+            n_correct += torch.sum(predictions == labels).item()
+            n_pred += torch.sum(predictions).item()
+            n_label += torch.sum(predictions).item()
         
         if no_its_and_itm:
             loss_cls_cl = 0
@@ -436,7 +428,7 @@ class DASCO(nn.Module):
             loss_classify = loss_target.mean()
             loss_cls_cl = loss_classify +  self.hyper3 * loss_cl
 
-        return loss_cls_cl, n_correct, n_pred, n_label
+        return loss_cls_cl, n_correct, n_label
     
     def forward(self, samples, no_its_and_itm=False):
         PQformer_outputs = self.pdq(samples, no_its_and_itm)  # torch.Size([6, 32, 768])
