@@ -43,12 +43,7 @@ def eval_MATE(model,dataloader,limit=0.5,device='cpu'):
             batch["IE_inputs"]['attention_mask'] = batch["IE_inputs"]['attention_mask'].to(device)
             batch["start_ids"]=batch["start_ids"].to(device)
             batch["end_ids"]=batch["end_ids"].to(device)
-            # batch["aspects_mask"]=batch["aspects_mask"].to(device)
-            # batch["aspects_scope"]=batch["aspects_scope"].to(device)
-            # batch["nouns_mask"]=batch["nouns_mask"].to(device)
-            # batch["nouns_scope"]=batch["nouns_scope"].to(device)
             batch["adj_matrix"]=batch["adj_matrix"].to(device)
-            # batch["aspect_targets"]=batch["aspect_targets"].to(device)
             batch["prompt_mask"]=batch["prompt_mask"].to(device)
 
             with maybe_autocast(model):
@@ -75,55 +70,23 @@ def eval_MASC(model,dataloader,limit=0.5,device='cpu'):
         for batch in tqdm(dataloader,desc="evaluating model"):
             batch["image_embeds"]=batch["image_embeds"].to(device)
             batch["query_inputs"] = batch["query_inputs"].to(device)
-            batch["answer_inputs"]['input_ids'] = batch["answer_inputs"]['input_ids'].to(device)
-            batch["answer_inputs"]['attention_mask'] = batch["answer_inputs"]['attention_mask'].to(device)
+            batch["scene_graph"]['input_ids'] = batch["scene_graph"]['input_ids'].to(device)  # [128, 512]
+            batch["scene_graph"]['attention_mask'] = batch["scene_graph"]['attention_mask'].to(device)  # [128, 512]
             batch["IE_inputs"]['input_ids'] = batch["IE_inputs"]['input_ids'].to(device)
             batch["IE_inputs"]['attention_mask'] = batch["IE_inputs"]['attention_mask'].to(device)
             batch["start_ids"]=batch["start_ids"].to(device)
             batch["end_ids"]=batch["end_ids"].to(device)
+            batch["adj_matrix"]=batch["adj_matrix"].to(device)
             batch["prompt_mask"]=batch["prompt_mask"].to(device)
 
             with maybe_autocast(model):
                 with torch.no_grad():
-                    b=batch["image_embeds"].size()[0]
                     output = model(batch,no_its_and_itm=True)
-                    start_ids=batch["start_ids"].float()
-                    end_ids=batch["end_ids"].float()
-                    span_pred=output.span_prob.float()
-                    span_pred[span_pred<limit]=0
-                    texts=batch["IE_inputs"]['input_ids']
-
-            for i in range(b):
-                start_ids_list=torch.nonzero(start_ids[i])
-                end_ids_list=torch.nonzero(end_ids[i])
-                ids_spans=get_span_for_eval(start_ids_list,end_ids_list)
-                pred_spans=get_best_pred_span(span_pred[i])
-
-                total_label+=len(ids_spans)
-                total_pred+=len(pred_spans)
-
-                for span in pred_spans:
-                    if span in ids_spans:
-                        total_correct+=1 
-
-                model_text=IE_tokenizer.decode(texts[i])
-                model_text=model_text.replace(" [PAD]","")
-
-                for x in range(len(pred_spans)):
-                    for p in range(2):
-                        pred_spans[x][p]=pred_spans[x][p]-32
-                pred_tokens=get_split_tokens(texts[i],pred_spans)
-                pred_entities=tokens2text(IE_tokenizer,pred_tokens)
-                pred_entities=[x for x in pred_entities if x!="" and x!='']
-
-                for x in range(len(ids_spans)):
-                    for p in range(2):
-                        ids_spans[x][p]=ids_spans[x][p]-32
-                ids_tokens=get_split_tokens(texts[i],ids_spans)
-                ids_entities=tokens2text(IE_tokenizer,ids_tokens)
-                ids_entities=[x for x in ids_entities if x!="" and x!='']
-
-
+            
+            total_correct += output.n_correct
+            total_pred += output.n_pred
+            total_label += output.n_label
+            
     model.train()
     return torch.tensor(total_correct).to(device),torch.tensor(total_label).to(device),torch.tensor(total_pred).to(device)
 
@@ -419,6 +382,10 @@ if __name__=="__main__":
     parser.add_argument('--task', type=str, default=None)
     parser.add_argument('--limit', type=float, default=0.5)
     parser.add_argument('--device', type=str, default="cuda:0")
+    parser.add_argument('--hyper1', type=float, default=0.2)
+    parser.add_argument('--hyper2', type=float, default=0.12)
+    parser.add_argument('--hyper3', type=float, default=0.2)
+    parser.add_argument('--gcn_layers', type=int, default=3)
 
 
     args = parser.parse_args()
@@ -433,7 +400,8 @@ if __name__=="__main__":
             num_query_token=32,
             SEP_token_id=2,
             split_token_id=187284,
-            set_size=1)
+            set_size=1,
+            task=args.task)
     elif args.task=="MABSA" :
         eval_ds = twitter_dataset(
             data_path=args.test_ds,
@@ -458,12 +426,12 @@ if __name__=="__main__":
         c, l, p = eval_MATE(model, eval_dataloader, limit=limit, device=device)
 
     if args.task=="MASC" :
-        model = from_pretrained(args.MASC_model)
+        model = from_pretrained(args.MASC_model, args)
         c,l,p=eval_MASC(model,eval_dataloader,limit=limit,device=device)
 
     if args.task== "MABSA":
-        MASC_model = from_pretrained(args.MASC_model)
-        MATE_model = from_pretrained(args.MATE_model)
+        MASC_model = from_pretrained(args.MASC_model, args)
+        MATE_model = from_pretrained(args.MATE_model, args)
         MASC_limit=MATE_limit=args.limit
         c, l, p, Ac, Al, Ap, e = eval_MABSA(MATE_model, MASC_model, eval_dataloader, MASC_limit=MASC_limit,MATE_limit=MATE_limit, device1=device)
 

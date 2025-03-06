@@ -80,12 +80,7 @@ def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,s
                 batch["IE_inputs"]['attention_mask'] = batch["IE_inputs"]['attention_mask'].to(device)
                 batch["start_ids"]=batch["start_ids"].to(device)
                 batch["end_ids"]=batch["end_ids"].to(device)
-                # batch["aspects_mask"]=batch["aspects_mask"].to(device)
-                # batch["aspects_scope"]=batch["aspects_scope"].to(device)
-                # batch["nouns_mask"]=batch["nouns_mask"].to(device)
-                # batch["nouns_scope"]=batch["nouns_scope"].to(device)
                 batch["adj_matrix"]=batch["adj_matrix"].to(device)
-                # batch["aspect_targets"]=batch["aspect_targets"].to(device)
                 batch["prompt_mask"]=batch["prompt_mask"].to(device)
                 step+=1
                 with maybe_autocast(model=model):
@@ -170,11 +165,17 @@ if __name__ == "__main__":
     device=accelerator.device
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('--task', type=str, default=None)
     parser.add_argument('--base_model', type=str, default="./Text_encoder/model_best", )
     parser.add_argument('--pretrain_model', type=str, default="./Text_encoder/model_best", )
 
     parser.add_argument('--train_ds', type=str, default="/home/data/finetune_dataset/twitter15/train.pkl")
     parser.add_argument('--eval_ds', type=str, default="/home/data/finetune_dataset/twitter15/dev.pkl")
+
+    parser.add_argument('--hyper1', type=float, default=0.2)
+    parser.add_argument('--hyper2', type=float, default=0.12)
+    parser.add_argument('--hyper3', type=float, default=0.2)
+    parser.add_argument('--gcn_layers', type=int, default=3)
 
     parser.add_argument('--lr', type=float, default=2e-5)
     parser.add_argument('--seed', type=int, default=0)
@@ -204,7 +205,8 @@ if __name__ == "__main__":
                     num_query_token=32,
                     SEP_token_id=2,
                     split_token_id=187284,
-                    set_size=3)
+                    set_size=3,
+                    task=args.task)
     eval_ds= twitter_dataset(
                     data_path=args.eval_ds,
                     max_seq_len=512,
@@ -213,7 +215,8 @@ if __name__ == "__main__":
                     num_query_token=32,
                     SEP_token_id=2,
                     split_token_id=187284,
-                    set_size=3)
+                    set_size=3,
+                    task=args.task)
 
     set_seed(args.seed)
     model=from_pretrained(args.pretrain_model, args)

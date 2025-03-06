@@ -171,7 +171,7 @@ def inputs_to_tree_reps(maxlen, head, words, l):
 
 # 解析包含情感分析标注的JSON文件
 def ParseData(data, max_seq_len, left_len):
-    polar_dict = {'POS':2, 'NEG':0, 'NEU':-1}  # 情感标签映射
+    polar_dict = {'POS':2, 'NEU':1, 'NEG':0}  # 情感标签映射
 
     d = data['parse_info']
     text_list = list(d['token'])
@@ -194,10 +194,13 @@ def ParseData(data, max_seq_len, left_len):
     aspects_item = []
     for aspect in d['aspects']:
         asp = str(aspect['term']).lower()
+        polarity = str(aspect['polarity']).strip().upper()
+        try:    
+            label = polar_dict[polarity]
+        except:
+            label = 1 # the only one bad data
 
         aspect_post = [int(aspect['from']), int(aspect['to'])]
-        # label = polar_dict[aspect['polarity']]
-        label = 1  # 此处有问题
         id_b, id_e = aspect_post
         s_b,s_e = aspect['scope']
         aspect_scope = [id_b - s_b, s_e - id_e]  # 表示左右各有几个词包含在scope中
@@ -248,6 +251,7 @@ class twitter_dataset(Dataset):
                 SEP_token_id=2,
                 split_token_id=187284,
                 set_size=10,
+                task='MATE',
                 with_label=False,
                 with_prompt_mask=True
                 ):
@@ -270,6 +274,7 @@ class twitter_dataset(Dataset):
         self.current_data_index=0
         self.with_label=with_label
         self.with_prompt_mask=with_prompt_mask
+        self.task=task
         if with_label:
             self.label_data=[]
             for x in label_filelist:
@@ -301,14 +306,24 @@ class twitter_dataset(Dataset):
     def __getitem__(self, index):
         image_feature=torch.from_numpy(self.data[index]["image_feature"])
         
-        query_inputs = self.PQ_former_tokenizer(
-            self.data[index]["query_input"],
-            padding="max_length",
-            truncation=True,
-            max_length=self.num_query_token,
-            return_tensors="pt",
-            add_special_tokens=False
-        )["input_ids"][0]
+        if self.task == 'MATE':
+            query_inputs = self.PQ_former_tokenizer(
+                self.data[index]["query_input"],
+                padding="max_length",
+                truncation=True,
+                max_length=self.num_query_token,
+                return_tensors="pt",
+                add_special_tokens=False
+            )["input_ids"][0]
+        elif self.task == 'MASC':
+            query_inputs = self.PQ_former_tokenizer(
+                'Determine the sentiment polarity of aspect terms',
+                padding="max_length",
+                truncation=True,
+                max_length=self.num_query_token,
+                return_tensors="pt",
+                add_special_tokens=False
+            )["input_ids"][0]
 
         scene_graph = self.PQ_former_tokenizer(
             self.data[index]["scene_graph"],
@@ -391,9 +406,13 @@ class twitter_dataset(Dataset):
         # aspect scope mask for each aspect
         aspects_scope = []
         text_tokens = parse_info['text_list']
+        # print(f"Number of aspects_item: {len(parse_info['aspects_item'])}")
+        # print(self.data[index]["text_input"])
+        # print(parse_info['aspects_item'])
+        # print(parse_info['text_list'])
         for aspect_item in parse_info['aspects_item']:
             aspect_tokens = aspect_item['aspect'].split()
-            text_lower = [x.lower() for x in text_tokens]
+            text_lower = [x.lower().strip('@') for x in text_tokens]
             
             phrase_start = None 
             for i in range(len(text_lower) - len(aspect_tokens) + 1):
@@ -401,13 +420,13 @@ class twitter_dataset(Dataset):
                     phrase_start = i 
                     break 
             if phrase_start is None:
-                continue  # 未找到匹配项 
+                continue  # 未找到匹配项
             phrase_end = phrase_start + len(aspect_tokens) - 1
 
             i, j = aspect_item['aspect_scope']
             safe_left = max(0, phrase_start - i)
             safe_right = min(len(text_tokens)-1, phrase_end + j)
-
+            # print(safe_left, safe_right)
             aspect_scope = torch.zeros(self.max_seq_len,  dtype=torch.int) 
             # 合并所有相关词元的token位置 
             for idx in range(safe_left, safe_right + 1):
@@ -422,7 +441,11 @@ class twitter_dataset(Dataset):
                         continue 
                     aspect_scope[start_pos_list[j]+self.num_query_token: end_pos_list[j]+self.num_query_token+1]=1
             aspects_scope.append(aspect_scope)
-        # aspects_scope = torch.stack(aspects_scope, dim=0)
+        try:
+            aspects_scope = torch.stack(aspects_scope, dim=0)
+        except:
+            # 创建一个默认的空 tensor，形状根据你的需求调整
+            aspects_scope = aspects_mask
 
         # nouns mask for each noun
         nouns_mask = []
@@ -468,7 +491,7 @@ class twitter_dataset(Dataset):
                 for j in range(len(start_pos_list)):
                     if end_pos_list[j]+self.num_query_token>=self.max_seq_len:
                         continue 
-                    noun_scope[start_pos_list[j]+self.num_query_token: end_pos_list[j]+self.num_query_token+1]=1 
+                    noun_scope[start_pos_list[j]+self.num_query_token: end_pos_list[j]+self.num_query_token+1]=1
             nouns_scope.append(noun_scope)
         nouns_scope = torch.stack(nouns_scope, dim=0)
 
@@ -482,7 +505,14 @@ class twitter_dataset(Dataset):
             noun_targets.append(n_target)
         noun_targets = torch.tensor(noun_targets)
 
-        res=[image_feature, query_inputs, scene_graph, IE_inputs, start_ids, end_ids, aspects_mask, aspects_scope, nouns_mask, nouns_scope, adj_matrix, noun_targets]
+        # aspect_term_target
+        aspect_targets = []
+        for aspect_item in parse_info['aspects_item']:
+            a_target = aspect_item['label']
+            aspect_targets.append(a_target)
+        aspect_targets = torch.tensor(aspect_targets)
+
+        res=[image_feature, query_inputs, scene_graph, IE_inputs, start_ids, end_ids, aspects_mask, aspects_scope, nouns_mask, nouns_scope, adj_matrix, noun_targets, aspect_targets]
 
         # label
         if self.with_label:
@@ -533,29 +563,25 @@ def collate_fn(batch):
     nouns_mask=[b[8] for b in batch]
     nouns_scope=[b[9] for b in batch]
 
-    # aspects_mask=torch.stack([b[6] for b in batch], dim=0)
-    # aspects_scope=torch.stack([b[7] for b in batch], dim=0)
-    # nouns_mask=torch.stack([b[8] for b in batch], dim=0)
-    # nouns_scope=torch.stack([b[9] for b in batch], dim=0)
-
     adj_matrix=torch.stack([b[10] for b in batch], dim=0)
+
     noun_targets=[b[11] for b in batch]
-    # aspect_targets=torch.stack([b[11] for b in batch], dim=0)
+    aspect_targets=[b[12] for b in batch]
 
     sample={"image_embeds":image_embeds,"query_inputs":query_inputs,"scene_graph":scene_graph,"IE_inputs":IE_inputs,
             "start_ids":start_ids,"end_ids":end_ids,"aspects_mask":aspects_mask,"aspects_scope":aspects_scope,
-            "nouns_mask":nouns_mask,"nouns_scope":nouns_scope,"adj_matrix":adj_matrix,"noun_targets":noun_targets
-            }
+            "nouns_mask":nouns_mask,"nouns_scope":nouns_scope,"adj_matrix":adj_matrix,"noun_targets":noun_targets, 
+            "aspect_targets":aspect_targets}
     
     try:
-        if batch[0][12]!=None:
-            label_data=[x[12] for x in batch ]
+        if batch[0][13]!=None:
+            label_data=[x[13] for x in batch ]
             sample["label_data"]=label_data
     except:
         pdb.set_trace()
 
-    if batch[0][13]!=None:
-        prompt_mask=torch.stack([b[13] for b in batch], dim=0)
+    if batch[0][14]!=None:
+        prompt_mask=torch.stack([b[14] for b in batch], dim=0)
         sample["prompt_mask"]=prompt_mask
     
     return sample
