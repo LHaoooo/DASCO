@@ -343,20 +343,24 @@ class DASCO(nn.Module):
         # Attention matrix
         for i in range(self.attention_heads):
             if adj_ag is None:
-                adj_ag = attn_adj_list[i]
+                adj_ag = attn_adj_list[i].clone()
             else:
                 adj_ag = adj_ag + attn_adj_list[i]
         adj_ag = adj_ag / self.attention_heads
 
         # 去除邻接矩阵的对角线元素，并添加自环，最后与文本编码器的注意力矩阵进行元素相乘。
+        adj_ag_modified = []
         for j in range(adj_ag.size(0)):
-            adj_ag[j] -= torch.diag(torch.diag(adj_ag[j]))
-            adj_ag[j] += torch.eye(adj_ag[j].size(0)).cuda()
+            temp = adj_ag[j] - torch.diag(torch.diag(adj_ag[j]))
+            temp = temp + torch.eye(temp.size(0), device=adj_ag.device)
+            adj_ag_modified.append(temp)
+        adj_ag = torch.stack(adj_ag_modified)
         adj_ag = text_encoder_atts.transpose(1, 2) * adj_ag
         
         H_l = gcn_inputs
+        si = nn.Sigmoid()
+        relu = nn.ReLU()
         for l in range(self.layers):
-            si = nn.Sigmoid()
             # **********GCN*********
             AH_sem = adj_ag.bmm(H_l)
             I_sem = self.semW[l](AH_sem) #SemGCN
@@ -366,14 +370,13 @@ class DASCO(nn.Module):
             g = si(I_dep)
             I_dep_g = self.hyper1 * g # [B, S, 768/2]
             I_com = torch.mul((1-I_dep_g),I_sem) + torch.mul(I_dep_g,I_dep) # adaptive fusion
-            relu = nn.ReLU()
             H_out = relu(self.fc3(I_com))
-            H_out = nn.LayerNorm(H_out.size(-1)).cuda()(H_out)
+            H_out = nn.LayerNorm(H_out.size(-1), device=H_out.device)(H_out)
             
             if l == 0:
-                H_l = self.fc4(H_l)
-            g_l = si(H_l)
-            H_l = torch.mul(g_l, H_out) + torch.mul((1 - g_l),H_l)
+                H_l_original = self.fc4(H_l)
+            g_l = si(H_l_original)
+            H_l = torch.mul(g_l, H_out) + torch.mul((1 - g_l),H_l_original)
 
         # span-masked graphCL
         h1 = self.projection(H_l)
@@ -409,10 +412,10 @@ class DASCO(nn.Module):
             outputs2 = summed_h2 / asp_wn_ori  # [N, D/2]
             outputs1 = nn.functional.normalize(outputs1,  p=2, dim=-1)  # L2归一化 
             outputs2 = nn.functional.normalize(outputs2,  p=2, dim=-1)
-            pooled_output[i] = nn.functional.normalize(pooled_output[i],  p=2, dim=-1)
+            pooled_output_normalized = nn.functional.normalize(pooled_output[i],  p=2, dim=-1)
 
             # 合并三个输出
-            final_outputs = torch.cat((outputs1, outputs2, pooled_output[i].repeat(outputs2.size(0), 1)), dim=-1)
+            final_outputs = torch.cat((outputs1, outputs2, pooled_output_normalized.repeat(outputs2.size(0), 1)), dim=-1)
             logits = self.classifier(final_outputs)  # [N, 3]
             loss_target += self.criterion(logits, samples['aspect_targets'][i].to(h1.device))
             
@@ -421,9 +424,9 @@ class DASCO(nn.Module):
 
             for prediction, label in zip(predictions, labels):
                 for cls in classes:
-                    class_stats[cls]['tp'] += (prediction == cls & label == cls)
-                    class_stats[cls]['fp'] += (prediction == cls & label != cls)
-                    class_stats[cls]['fn'] += (prediction != cls & label == cls)
+                    class_stats[cls]['tp'] += ((prediction == cls) & (label == cls)).sum().item()
+                    class_stats[cls]['fp'] += ((prediction == cls) & (label != cls)).sum().item()
+                    class_stats[cls]['fn'] += ((prediction != cls) & (label == cls)).sum().item()
 
             n_correct += (predictions == labels).sum().item()
             n_pred += samples['aspects_mask'][i].size(0)

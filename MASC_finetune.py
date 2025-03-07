@@ -40,10 +40,10 @@ def compute_metric_macro(total_correct,total_label,merged=None):
 
     # 计算macro F1 
     f1_scores = []
-    for cls in merged:
-        tp = merged[cls]['tp']
-        fp = merged[cls]['fp']
-        fn = merged[cls]['fn']
+    for cls in [0,1,2]:
+        tp = merged[cls]['tp'].sum().item()
+        fp = merged[cls]['fp'].sum().item()
+        fn = merged[cls]['fn'].sum().item()
  
         # 处理除零保护 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0 
@@ -124,7 +124,14 @@ def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,s
                     total_correct=accelerator.gather(eval_res[0]).sum()
                     total_label=accelerator.gather(eval_res[1]).sum()
                     total_pred=accelerator.gather(eval_res[2]).sum()
-                    merged=accelerator.gather(eval_res[3])
+                    merged_dict=accelerator.gather_for_metrics(eval_res[3])
+                    merged = {cls: {'tp': 0, 'fp': 0, 'fn': 0} for cls in [0,1,2]}
+
+                    for cls in [0,1,2]:
+                        merged[cls]['tp'] += merged_dict[cls]['tp']
+                        merged[cls]['fp'] += merged_dict[cls]['fp']
+                        merged[cls]['fn'] += merged_dict[cls]['fn']
+
                     accelerator.wait_for_everyone()
                     accuracy,macro_f1=compute_metric_macro(total_correct.item(),total_label.item(),merged)
 

@@ -26,14 +26,15 @@ def compute_metric(total_correct,total_label,total_pred):
     return precision,recall,f1
 
 def compute_metric_macro(total_correct,total_label,merged=None):
+    classes = [0, 1, 2]
     Accuracy=total_correct/total_label if total_correct else 0.0
 
     # 计算macro F1 
     f1_scores = []
-    for cls in merged:
-        tp = merged[cls]['tp']
-        fp = merged[cls]['fp']
-        fn = merged[cls]['fn']
+    for cls in classes:
+        tp = merged[cls]['tp'].sum().item()
+        fp = merged[cls]['fp'].sum().item()
+        fn = merged[cls]['fn'].sum().item()
  
         # 处理除零保护 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0 
@@ -109,13 +110,18 @@ def eval_MASC(model,dataloader,limit=0.5,device='cpu'):
             total_correct += output.n_correct
             total_pred += output.n_pred
             total_label += output.n_label
-            for cls in output.class_stats:
+            for cls in classes:
                 merged[cls]['tp'] += output.class_stats[cls]['tp']
                 merged[cls]['fp'] += output.class_stats[cls]['fp']
                 merged[cls]['fn'] += output.class_stats[cls]['fn']
+    
+    for cls in classes:
+        merged[cls]['tp'] = torch.tensor(merged[cls]['tp']).to(device)
+        merged[cls]['fp'] = torch.tensor(merged[cls]['fp']).to(device)
+        merged[cls]['fn'] = torch.tensor(merged[cls]['fn']).to(device)
             
     model.train()
-    return total_correct, total_label, total_pred, merged
+    return torch.tensor(total_correct).to(device),torch.tensor(total_label).to(device),torch.tensor(total_pred).to(device), merged
 
 def maybe_autocast(model, device=None,dtype=torch.float16):
     # if on cpu, don't use autocast
@@ -458,7 +464,7 @@ if __name__=="__main__":
         model = from_pretrained(args.MASC_model, args)
         c,l,p,merged=eval_MASC(model,eval_dataloader,limit=limit,device=device)
         a, f1 = compute_metric_macro(c, l, merged)
-        print(f"Correct:{c}, Label:{l}, Prediction:{p}; Accuracy:{100 * a:.3f}, Macro-F1:{100 * f1:.3f}")
+        print(f"Correct:{c}, Label:{l}, Prediction:{p}; Accuracy:{100 * a:.3f}, Macro_f1:{100 * f1:.3f}")
 
     if args.task== "MABSA":
         MASC_model = from_pretrained(args.MASC_model, args)
