@@ -34,13 +34,28 @@ def save_checkpoint(state, save_path, step):
         save_dir=os.path.join(save_path,f"step_{step/1000}k.pt")
     # 存储模型和训练状态
     accelerator.save(state, save_dir)
-
-def compute_metric(total_correct,total_label,total_pred):
-    precision = total_correct / total_pred if total_correct  else 0.0
-    recall=total_correct/total_label if total_correct else 0.0
-    f1=(2 * (precision * recall) / (precision + recall)) if total_correct else 0.0
-    return precision,recall,f1
     
+def compute_metric_macro(total_correct,total_label,merged=None):
+    Accuracy=total_correct/total_label if total_correct else 0.0
+
+    # 计算macro F1 
+    f1_scores = []
+    for cls in merged:
+        tp = merged[cls]['tp']
+        fp = merged[cls]['fp']
+        fn = merged[cls]['fn']
+ 
+        # 处理除零保护 
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0 
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0 
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0 
+        
+        f1_scores.append(f1) 
+    
+    macro_f1 = sum(f1_scores) / len(f1_scores)
+    
+    return Accuracy,macro_f1
+
 def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,save_step,val_step,batch_size,save_path,device,accumulation_steps,scheduler=None,eval_dataset=None):
 
     torch.autograd.set_detect_anomaly(True)
@@ -109,26 +124,25 @@ def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,s
                     total_correct=accelerator.gather(eval_res[0]).sum()
                     total_label=accelerator.gather(eval_res[1]).sum()
                     total_pred=accelerator.gather(eval_res[2]).sum()
+                    merged=accelerator.gather(eval_res[3])
                     accelerator.wait_for_everyone()
-                    total_precision,total_recall,total_f1=compute_metric(total_correct.item(),total_label.item(),total_pred.item())
+                    accuracy,macro_f1=compute_metric_macro(total_correct.item(),total_label.item(),merged)
 
                     if accelerator.is_local_main_process:
                         print("total_correct:",total_correct)
                         print("total_label:",total_label)
                         print("total_pred:",total_pred)
-                        print("P:",total_precision)
-                        print("R:",total_recall)
-                        print("f1:",total_f1)
-                        writer.add_scalar('evaluate/total_P', total_precision, step)
-                        writer.add_scalar('evaluate/total_R', total_recall, step)
-                        writer.add_scalar('evaluate/total_F1', total_f1, step)
+                        print("Accuracy:",accuracy)
+                        print("Macro_f1:",macro_f1)
+                        writer.add_scalar('evaluate/Accuracy', accuracy, step)
+                        writer.add_scalar('evaluate/Macro_F1', macro_f1, step)
                     
                     accelerator.wait_for_everyone()
-                    if total_f1>best_f1 and accelerator.is_local_main_process:
-                        best_f1=total_f1
+                    if macro_f1>best_f1 and accelerator.is_local_main_process:
+                        best_f1=macro_f1
                         unwrapped_model = accelerator.unwrap_model(model)
                         # save
-                        save_checkpoint(unwrapped_model.state_dict(), save_path, f"best_f1:{format(100*total_f1, '.3f')}")
+                        save_checkpoint(unwrapped_model.state_dict(), save_path, f"best_f1:{format(100*macro_f1, '.3f')}")
                 accelerator.wait_for_everyone()
 
                 if step%log_step==0 and accelerator.is_local_main_process:

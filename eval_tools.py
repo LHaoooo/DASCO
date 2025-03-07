@@ -25,6 +25,27 @@ def compute_metric(total_correct,total_label,total_pred):
     f1=(2 * (precision * recall) / (precision + recall)) if total_correct else 0.0
     return precision,recall,f1
 
+def compute_metric_macro(total_correct,total_label,merged=None):
+    Accuracy=total_correct/total_label if total_correct else 0.0
+
+    # 计算macro F1 
+    f1_scores = []
+    for cls in merged:
+        tp = merged[cls]['tp']
+        fp = merged[cls]['fp']
+        fn = merged[cls]['fn']
+ 
+        # 处理除零保护 
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0 
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0 
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0 
+        
+        f1_scores.append(f1) 
+    
+    macro_f1 = sum(f1_scores) / len(f1_scores)
+    
+    return Accuracy, macro_f1
+
 def eval_MATE(model,dataloader,limit=0.5,device='cpu'):
     
     model.to(device)
@@ -65,6 +86,8 @@ def eval_MASC(model,dataloader,limit=0.5,device='cpu'):
     total_correct = 0
     total_label = 0
     total_pred=0
+    classes = [0, 1, 2]
+    merged = {cls: {'tp': 0, 'fp': 0, 'fn': 0} for cls in classes}
 
     with torch.no_grad():
         for batch in tqdm(dataloader,desc="evaluating model"):
@@ -86,9 +109,13 @@ def eval_MASC(model,dataloader,limit=0.5,device='cpu'):
             total_correct += output.n_correct
             total_pred += output.n_pred
             total_label += output.n_label
+            for cls in output.class_stats:
+                merged[cls]['tp'] += output.class_stats[cls]['tp']
+                merged[cls]['fp'] += output.class_stats[cls]['fp']
+                merged[cls]['fn'] += output.class_stats[cls]['fn']
             
     model.train()
-    return torch.tensor(total_correct).to(device),torch.tensor(total_label).to(device),torch.tensor(total_pred).to(device)
+    return total_correct, total_label, total_pred, merged
 
 def maybe_autocast(model, device=None,dtype=torch.float16):
     # if on cpu, don't use autocast
@@ -424,17 +451,21 @@ if __name__=="__main__":
         import pdb
         model = from_pretrained(args.MATE_model, args)
         c, l, p = eval_MATE(model, eval_dataloader, limit=limit, device=device)
+        a, r, f1 = compute_metric(c, l, p)
+        print(f"Correct:{c}, Label:{l}, Prediction:{p}; Accuracy:{100 * a:.3f}, Recall:{100 * r:.3f}, F1:{100 * f1:.3f}")
 
     if args.task=="MASC" :
         model = from_pretrained(args.MASC_model, args)
-        c,l,p=eval_MASC(model,eval_dataloader,limit=limit,device=device)
+        c,l,p,merged=eval_MASC(model,eval_dataloader,limit=limit,device=device)
+        a, f1 = compute_metric_macro(c, l, merged)
+        print(f"Correct:{c}, Label:{l}, Prediction:{p}; Accuracy:{100 * a:.3f}, Macro-F1:{100 * f1:.3f}")
 
     if args.task== "MABSA":
         MASC_model = from_pretrained(args.MASC_model, args)
         MATE_model = from_pretrained(args.MATE_model, args)
         MASC_limit=MATE_limit=args.limit
         c, l, p, Ac, Al, Ap, e = eval_MABSA(MATE_model, MASC_model, eval_dataloader, MASC_limit=MASC_limit,MATE_limit=MATE_limit, device1=device)
+        a, r, f1 = compute_metric(c, l, p)
+        print(f"Correct:{c}, Label:{l}, Prediction:{p}; Accuracy:{100 * a:.3f}, Recall:{100 * r:.3f}, F1:{100 * f1:.3f}")
 
-    a, r, f1 = compute_metric(c, l, p)
-    print(f"Correct:{c}, Label:{l}, Prediction:{p}; Accuracy:{100 * a:.3f}, Recall:{100 * r:.3f}, F1:{100 * f1:.3f}")
 

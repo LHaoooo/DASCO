@@ -6,7 +6,7 @@ from transformers import AutoModel, AutoImageProcessor
 from Text_encoder.sparse_attn_model import Text_encoder_with_epe
 from PDQ.PDQ import PDQ
 from transformers.utils import ModelOutput
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 import torch.nn as nn
 import torch
 from dataclasses import dataclass
@@ -24,6 +24,7 @@ class DASCO_Output(ModelOutput):
     n_correct: Optional[torch.LongTensor] = None
     n_pred: Optional[torch.LongTensor] = None
     n_label: Optional[torch.LongTensor] = None
+    class_stats: Optional[Dict[int, Dict[str, torch.LongTensor]]] = None
 
 
 def get_pred_span(start_ids, end_ids):
@@ -145,9 +146,10 @@ class DASCO(nn.Module):
         self.sigmoid = nn.Sigmoid()
         if self.task == 'MATE':
             self.classifier = nn.Linear(self.hidden_size*2, 2)
+            self.criterion = nn.CrossEntropyLoss()
         elif self.task == 'MASC':
             self.classifier = nn.Linear(self.hidden_size*2, 3)
-        self.criterion = nn.CrossEntropyLoss()
+            self.criterion = nn.CrossEntropyLoss(weight=torch.tensor([0.2, 0.5, 0.3]))
 
     def projection(self, z: torch.Tensor) -> torch.Tensor:
         z = F.elu(self.fc1(z))
@@ -270,7 +272,7 @@ class DASCO(nn.Module):
             I_dep = self.depW[l](AH_dep) #depGCN
 
             g = si(I_dep)
-            I_dep_g = self.hyper1 * g # [16, 100, 768/2]
+            I_dep_g = self.hyper1 * g # [B, S, 768/2]
             I_com = torch.mul((1-I_dep_g),I_sem) + torch.mul(I_dep_g,I_dep) # adaptive fusion
             relu = nn.ReLU()
             H_out = relu(self.fc3(I_com))
@@ -362,10 +364,11 @@ class DASCO(nn.Module):
             I_dep = self.depW[l](AH_dep) #depGCN
 
             g = si(I_dep)
-            I_dep_g = self.hyper1 * g # [16, 100, 768/2]
+            I_dep_g = self.hyper1 * g # [B, S, 768/2]
             I_com = torch.mul((1-I_dep_g),I_sem) + torch.mul(I_dep_g,I_dep) # adaptive fusion
             relu = nn.ReLU()
             H_out = relu(self.fc3(I_com))
+            H_out = nn.LayerNorm(H_out.size(-1)).cuda()(H_out)
             
             if l == 0:
                 H_l = self.fc4(H_l)
@@ -376,9 +379,6 @@ class DASCO(nn.Module):
         h1 = self.projection(H_l)
         h2 = self.projection(I_sem)  #[B,s,D/2]
         if no_its_and_itm:
-            l1 = 0
-            l2 = 0
-            loss_avg = 0
             loss_cl = 0
         else:
             l1 = self.scope_semi_loss_list(h1, h2, samples['aspects_scope'], samples['aspects_mask'])
@@ -388,47 +388,54 @@ class DASCO(nn.Module):
             loss_cl = loss_avg.mean()
 
         loss_target = 0
+        classes = [0, 1, 2]
+        class_stats = {cls: {'tp': 0, 'fp': 0, 'fn': 0} for cls in classes}
         n_correct = 0
         n_pred = 0
         n_label = 0
+
         for i in range(len(samples['aspects_mask'])):
             asp_wn_ori = samples['aspects_mask'][i].sum(dim=-1).unsqueeze(-1).to(h1.device) # [N,1]
             asp_wn_ori = torch.clamp(asp_wn_ori, min=1.0)
             n_mask_ori = samples['aspects_mask'][i].unsqueeze(-1).repeat(1, 1, self.hidden_size // 2).to(h1.device)  # [N,S,D/2]
             
-            # 目标: 使h1.i和h2.i变为[1,S,D/2]以便与[N,S,D/2]的n_mask进行广播
             h1_expanded = h1[i].unsqueeze(0)  # [1, S, D/2]
             h2_expanded = h2[i].unsqueeze(0)  # [1, S, D/2]
-            # 现在进行乘法操作，结果将广播为[N,S,D/2]
             masked_h1 = h1_expanded * n_mask_ori  # [N, S, D/2]
             masked_h2 = h2_expanded * n_mask_ori  # [N, S, D/2]
-            # 对序列维度求和
             summed_h1 = masked_h1.sum(dim=1)  # [N, D/2]   
             summed_h2 = masked_h2.sum(dim=1)  # [N, D/2]
-            # 确保asp_wn_ori形状为[N,1]以便除法广播
-            # 如果asp_wn_ori已经是[N,1]形状，可以直接使用
             outputs1 = summed_h1 / asp_wn_ori  # [N, D/2]
             outputs2 = summed_h2 / asp_wn_ori  # [N, D/2]
+            outputs1 = nn.functional.normalize(outputs1,  p=2, dim=-1)  # L2归一化 
+            outputs2 = nn.functional.normalize(outputs2,  p=2, dim=-1)
+            pooled_output[i] = nn.functional.normalize(pooled_output[i],  p=2, dim=-1)
 
             # 合并三个输出
             final_outputs = torch.cat((outputs1, outputs2, pooled_output[i].repeat(outputs2.size(0), 1)), dim=-1)
-            logits = self.classifier(final_outputs)  # [N, 2]
+            logits = self.classifier(final_outputs)  # [N, 3]
             loss_target += self.criterion(logits, samples['aspect_targets'][i].to(h1.device))
             
             labels = samples['aspect_targets'][i].to(h1.device)
-            predictions = torch.argmax(logits, dim=-1)
+            predictions = torch.argmax(logits, dim=-1)  # [N]
 
-            n_correct += torch.sum(predictions == labels).item()
-            n_pred += torch.sum(predictions).item()
-            n_label += torch.sum(predictions).item()
+            for prediction, label in zip(predictions, labels):
+                for cls in classes:
+                    class_stats[cls]['tp'] += (prediction == cls & label == cls)
+                    class_stats[cls]['fp'] += (prediction == cls & label != cls)
+                    class_stats[cls]['fn'] += (prediction != cls & label == cls)
+
+            n_correct += (predictions == labels).sum().item()
+            n_pred += samples['aspects_mask'][i].size(0)
+            n_label += samples['aspects_mask'][i].size(0)
         
         if no_its_and_itm:
             loss_cls_cl = 0
         else:
             loss_classify = loss_target.mean()
             loss_cls_cl = loss_classify +  self.hyper3 * loss_cl
-
-        return loss_cls_cl, n_correct, n_label
+        
+        return loss_cls_cl, n_correct, n_pred, n_label, class_stats
     
     def forward(self, samples, no_its_and_itm=False):
         PQformer_outputs = self.pdq(samples, no_its_and_itm)  # torch.Size([6, 32, 768])
@@ -459,7 +466,7 @@ class DASCO(nn.Module):
         if self.task == "MATE":
             loss_cls_cl, n_correct, n_pred, n_label = self.mate_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
         elif self.task == "MASC":
-            loss_cls_cl, n_correct, n_pred, n_label = self.masc_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
+            loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
         elif self.task == "JMASA":
             loss_cls_cl = 0
 
@@ -477,7 +484,8 @@ class DASCO(nn.Module):
             loss_lm=PQformer_outputs.loss_lm,
             n_correct = n_correct,
             n_pred = n_pred,
-            n_label = n_label
+            n_label = n_label,
+            class_stats = class_stats
         )
 
 

@@ -317,7 +317,7 @@ class twitter_dataset(Dataset):
             )["input_ids"][0]
         elif self.task == 'MASC':
             query_inputs = self.PQ_former_tokenizer(
-                'Determine the sentiment polarity of aspect terms',
+                'Classify the sentiment polarity of aspect terms',
                 padding="max_length",
                 truncation=True,
                 max_length=self.num_query_token,
@@ -384,6 +384,14 @@ class twitter_dataset(Dataset):
         
         # aspect mask for each aspect
         aspects_mask = []
+        # for aspect_item in parse_info['aspects_item']:
+        #     aspect_mask = torch.zeros(self.max_seq_len).int()
+        #     start_pos_list,end_pos_list=get_span(target=aspect_item['aspect'],
+        #                                     input_ids=IE_inputs["input_ids"],
+        #                                     tokenizer=self.IE_tokenizer)
+        #     for j in range(len(start_pos_list)):
+        #         aspect_mask[start_pos_list[j]+self.num_query_token: end_pos_list[j]+self.num_query_token+1]=1
+        #     aspects_mask.append(aspect_mask)
         if isinstance(self.data[index]["target"],list):
             for i in self.data[index]["target"]:
                 aspect_mask = torch.zeros(self.max_seq_len).int()
@@ -406,10 +414,6 @@ class twitter_dataset(Dataset):
         # aspect scope mask for each aspect
         aspects_scope = []
         text_tokens = parse_info['text_list']
-        # print(f"Number of aspects_item: {len(parse_info['aspects_item'])}")
-        # print(self.data[index]["text_input"])
-        # print(parse_info['aspects_item'])
-        # print(parse_info['text_list'])
         for aspect_item in parse_info['aspects_item']:
             aspect_tokens = aspect_item['aspect'].split()
             text_lower = [x.lower().strip('@') for x in text_tokens]
@@ -426,7 +430,6 @@ class twitter_dataset(Dataset):
             i, j = aspect_item['aspect_scope']
             safe_left = max(0, phrase_start - i)
             safe_right = min(len(text_tokens)-1, phrase_end + j)
-            # print(safe_left, safe_right)
             aspect_scope = torch.zeros(self.max_seq_len,  dtype=torch.int) 
             # 合并所有相关词元的token位置 
             for idx in range(safe_left, safe_right + 1):
@@ -444,7 +447,7 @@ class twitter_dataset(Dataset):
         try:
             aspects_scope = torch.stack(aspects_scope, dim=0)
         except:
-            # 创建一个默认的空 tensor，形状根据你的需求调整
+            # make aspects_mask as aspects_scope if no aspect_scope is available (bad data)
             aspects_scope = aspects_mask
 
         # nouns mask for each noun
@@ -592,12 +595,12 @@ if __name__=="__main__":
     os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
     PQ_tokenizer=BertTokenizer.from_pretrained("bert-base-uncased")
     IE_tokenizer=BertTokenizer.from_pretrained("./Text_encoder/model_best")
-    with open('/home/data/finetune_dataset/twitter15/dev_data/dev.pkl', 'rb') as f:
+    with open('/home/data/finetune_dataset/twitter15/dev/dev.pkl', 'rb') as f:
         loaded_data = pickle.load(f)
     # print(loaded_data[0]['nouns'])
     
     eval_ds= twitter_dataset(
-                    data_path="/home/data/finetune_dataset/twitter15/dev_data",
+                    data_path="/home/data/finetune_dataset/twitter15/test",
                     max_seq_len=512,
                     IE_tokenizer=IE_tokenizer,
                     PQ_former_tokenizer=PQ_tokenizer,
@@ -606,7 +609,7 @@ if __name__=="__main__":
                     split_token_id=187284,
                     set_size=3)
     eval_ds.update_data()
-    eval_dataloader=DataLoader(eval_ds,batch_size=20,collate_fn=collate_fn)
+    eval_dataloader=DataLoader(eval_ds,batch_size=5,collate_fn=collate_fn)
     
     # for i,batch in enumerate(eval_dataloader):
     #     # print(loaded_data[i]['nouns'])
@@ -659,13 +662,15 @@ if __name__=="__main__":
         # print(IE_tokenizer.decode(input_ids))
         aspect_mask = batch['aspects_mask'][0][0]
         aspect_scope = batch['aspects_scope'][0][0]
+        print(aspect_mask)
+        print(aspect_scope)
 
         valid_ids = [j for j, mask in zip(input_ids, aspect_mask) if mask == 1]
         tokens = IE_tokenizer.convert_ids_to_tokens(valid_ids)
-        print(tokens)
+        # print(tokens)
         scope_ids = [j for j, mask in zip(input_ids, aspect_scope) if mask == 1]
         scopes = IE_tokenizer.convert_ids_to_tokens(scope_ids)
-        print(scopes)
+        # print(scopes)
 
         merged_tokens = []
         current_token = ""
@@ -693,5 +698,5 @@ if __name__=="__main__":
         output_tokens = " ".join(scope_tokens)
         print(f"scope: 最终输出 -> {output_tokens}")
 
-        if i == 19:
+        if i == 4:
             break
