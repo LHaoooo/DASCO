@@ -60,8 +60,8 @@ export CUDA_VISIBLE_DEVICES="4"
 
 # MASC evaluation
 
-CHECKPOINT_DIR="./checkpoints/MASC_2015"
-TEST_DATA="/home/data/finetune_dataset/twitter15/test"
+CHECKPOINT_DIR="./checkpoints/MASC_2017"
+TEST_DATA="/home/data/finetune_dataset/twitter17/test"
 
 best_stats_values=(0 0 0 0 0 "None")  # [Correct, Label, Prediction, Accuracy, Macro_F1, Model]
 declare -r COR=0 LABEL=1 PRED=2 ACC=3 MacroF1=4 MODEL=5
