@@ -306,7 +306,7 @@ class twitter_dataset(Dataset):
     def __getitem__(self, index):
         image_feature=torch.from_numpy(self.data[index]["image_feature"])
         
-        if self.task == 'MATE':
+        if self.task == 'MATE' or self.task == 'MABSA':
             query_inputs = self.PQ_former_tokenizer(
                 self.data[index]["query_input"],
                 padding="max_length",

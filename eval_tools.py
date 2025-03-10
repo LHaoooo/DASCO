@@ -286,115 +286,45 @@ def get_span_for_eval(start_list,end_list):
             j+=1
     return text_span
 
-def eval_MABSA(MATE_model,MASC_model,dataloader,MATE_limit=0.5,MASC_limit=0.3,device1='cpu'):
+def eval_MABSA(MATE_model,MASC_model,dataloader,MATE_limit=0.5,MASC_limit=0.3,device='cpu'):
     total_pred=0
     total_label=0
     total_correct=0
 
-    total_aspect_label=0
-    total_aspect_pred=0
-    total_aspect_correct=0
-    total_error_sentiment=0
-
-    
-    MATE_model.to(device1)
+    MATE_model.to(device)
     MATE_model.eval()
-    MASC_model.to(device1)
+    MASC_model.to(device)
     MASC_model.eval()
 
+
     for batch in tqdm(dataloader,desc="evaluating model"):
-        
         #MATE
-        # batch['images'] = batch['images']
-        batch["image_embeds"]=batch["image_embeds"].to(device1)
-        batch["query_inputs"] = batch["query_inputs"].to(device1)
-        batch["answer_inputs"]['input_ids'] = batch["answer_inputs"]['input_ids'].to(device1)
-        batch["answer_inputs"]['attention_mask'] = batch["answer_inputs"]['attention_mask'].to(device1)
-        batch["IE_inputs"]['input_ids'] = batch["IE_inputs"]['input_ids'].to(device1)
-        batch["IE_inputs"]['attention_mask'] = batch["IE_inputs"]['attention_mask'].to(device1)
-        batch["start_ids"]=batch["start_ids"].to(device1)
-        batch["end_ids"]=batch["end_ids"].to(device1)
-        batch["prompt_mask"]=batch["prompt_mask"].to(device1)
+        batch["image_embeds"]=batch["image_embeds"].to(device)
+        batch["query_inputs"] = batch["query_inputs"].to(device)
+        batch["scene_graph"]['input_ids'] = batch["scene_graph"]['input_ids'].to(device)  # [128, 512]
+        batch["scene_graph"]['attention_mask'] = batch["scene_graph"]['attention_mask'].to(device)  # [128, 512]
+        batch["IE_inputs"]['input_ids'] = batch["IE_inputs"]['input_ids'].to(device)
+        batch["IE_inputs"]['attention_mask'] = batch["IE_inputs"]['attention_mask'].to(device)
+        batch["start_ids"]=batch["start_ids"].to(device)
+        batch["end_ids"]=batch["end_ids"].to(device)
+        batch["adj_matrix"]=batch["adj_matrix"].to(device)
+        batch["prompt_mask"]=batch["prompt_mask"].to(device)
 
         with maybe_autocast(MATE_model):
             with torch.no_grad():
-                b=batch["image_embeds"].size()[0]
                 output = MATE_model(batch,no_its_and_itm=True)
-                span_pred=output.span_prob.float()
-                span_pred[span_pred<MATE_limit]=0
-                texts=batch["IE_inputs"]['input_ids']
-                label_texts=batch["label_data"]
+                new_batch = output.new_batch
+        with maybe_autocast(MASC_model):
+            with torch.no_grad():      
+                masc_output = MASC_model(new_batch,no_its_and_itm=True)
 
-        IE_tokenizer=MATE_model.tokenizer
-        PQ_former_tokenizer=MATE_model.pdq.tokenizer
-        for i in range(b):
-            #get pred span
-            pred_spans=get_span_for_eval_2d(span_pred[i])
+        total_correct += masc_output.n_correct - output.false_num
+        total_pred += output.n_pred
+        total_label += output.n_label
 
-            text=label_texts[i]['text']
-            label_AS_pairs=label_texts[i]['AS_pairs']
-
-            for AS_pair in label_AS_pairs:
-                AS_pair[0]=AS_pair[0].lower()
-
-            pred_AS_pairs=[]
-            #Remove 32 image tokens
-            for x in range(len(pred_spans)):
-                for p in range(2):
-                    pred_spans[x][p]=pred_spans[x][p]-32
-
-            pred_tokens=get_split_tokens(texts[i],pred_spans)
-            pred_entities=tokens2text(IE_tokenizer,pred_tokens)
-            pred_entities=[x for x in pred_entities if x!="" and x!='']
-            if len(pred_entities)>0:
-                for p in range(0,len(pred_entities),1):
-                    pred_entities_slice=pred_entities[p:p+1]
-                    # try:
-                    new_batch=build_temp_samples(PQ_former_tokenizer=PQ_former_tokenizer,IE_tokenizer=IE_tokenizer,image_embeds=batch["image_embeds"][i],pred_entities=pred_entities_slice,prompt_mask=batch["prompt_mask"][i],text_input=text,sample_cls="sentiment")
-                    sentiments=single_batch_pred(MASC_model,new_batch,device1,limit=MASC_limit,no_its_and_itm=True,return_best_pred=True)
-                
-                    for j,e in enumerate(pred_entities_slice):
-                        for sentiment in sentiments[j]:
-                            pred_AS_pairs.append([e,sentiment])
-            
-            total_pred+=len(pred_AS_pairs)
-            total_label+=len(label_AS_pairs)
-
-            pred_aspects=pred_entities
-            label_aspects=[x[0] for x in label_AS_pairs]
-            total_aspect_pred+=len(pred_aspects)
-            total_aspect_label+=len(label_aspects)
-            for i in pred_aspects:
-                if i in label_aspects:
-                    total_aspect_correct+=1
-
-
-            for pair in pred_AS_pairs:
-                if pair in label_AS_pairs:
-                    total_correct+=1
-                elif pair[0] in label_aspects :
-                    total_error_sentiment+=1
-
-          
-            # with open("MABSA.txt", 'a') as f:
-            #     if not pred_AS_pairs==label_AS_pairs:
-            #         f.write("This is a wrong sample\n")
-            #     f.write(f"Text: {text}\n")
-            #     f.write(f"Label entities: {label_AS_pairs}\n")
-            #     f.write(f"Pred entities: {pred_AS_pairs}\n")
-            #     f.write("\n")
-        
-
-    
-    MASC_model.train()
-    MATE_model.train()
-    return torch.tensor(total_correct).to(device1),\
-           torch.tensor(total_label).to(device1),\
-           torch.tensor(total_pred).to(device1),\
-           torch.tensor(total_aspect_correct).to(device1),\
-           torch.tensor(total_aspect_label).to(device1),\
-           torch.tensor(total_aspect_pred).to(device1),\
-           torch.tensor(total_error_sentiment).to(device1),\
+    return torch.tensor(total_correct).to(device),\
+           torch.tensor(total_label).to(device),\
+           torch.tensor(total_pred).to(device)
 
 mode_list=["MATE","MASC","Dual_JMASA"]
 mode=mode_list[1]
@@ -420,7 +350,6 @@ if __name__=="__main__":
     parser.add_argument('--hyper3', type=float, default=0.2)
     parser.add_argument('--gcn_layers', type=int, default=3)
 
-
     args = parser.parse_args()
     IE_tokenizer = BertTokenizer.from_pretrained(args.base_model)
     PQ_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
@@ -445,10 +374,10 @@ if __name__=="__main__":
             SEP_token_id=2,
             split_token_id=187284,
             set_size=1,
-            with_label=True)
+            task=args.task)
         
     eval_ds.update_data()
-    eval_dataloader = DataLoader(eval_ds, batch_size=128, collate_fn=collate_fn, shuffle=False)
+    eval_dataloader = DataLoader(eval_ds, batch_size=64, collate_fn=collate_fn, shuffle=False)
 
     limit = args.limit
     device=args.device
@@ -467,10 +396,12 @@ if __name__=="__main__":
         print(f"Correct:{c}, Label:{l}, Prediction:{p}; Accuracy:{100 * a:.3f}, Macro_f1:{100 * f1:.3f}")
 
     if args.task== "MABSA":
-        MASC_model = from_pretrained(args.MASC_model, args)
         MATE_model = from_pretrained(args.MATE_model, args)
+        args.gcn_layers=4
+        args.task= "MASC"
+        MASC_model = from_pretrained(args.MASC_model, args)
         MASC_limit=MATE_limit=args.limit
-        c, l, p, Ac, Al, Ap, e = eval_MABSA(MATE_model, MASC_model, eval_dataloader, MASC_limit=MASC_limit,MATE_limit=MATE_limit, device1=device)
+        c, l, p = eval_MABSA(MATE_model, MASC_model, eval_dataloader, MASC_limit=MASC_limit,MATE_limit=MATE_limit, device=device)
         a, r, f1 = compute_metric(c, l, p)
         print(f"Correct:{c}, Label:{l}, Prediction:{p}; Accuracy:{100 * a:.3f}, Recall:{100 * r:.3f}, F1:{100 * f1:.3f}")
 

@@ -86,12 +86,9 @@ class Text_encoder_with_epe(BertPreTrainedModel):
                 attention_mask: Optional[torch.Tensor] = None,
                 head_mask: Optional[torch.Tensor] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
-                start_positions: Optional[torch.Tensor] = None,
-                end_positions: Optional[torch.Tensor] = None,
                 output_attentions: Optional[bool] = None,
                 output_hidden_states: Optional[bool] = None,
                 return_dict: Optional[bool] = None,
-                prompt_mask: Optional[torch.Tensor] = None,
                 ):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
@@ -118,23 +115,3 @@ class Text_encoder_with_epe(BertPreTrainedModel):
             fuzzy_span_attentions=None
         
         return sequence_output,pooled_output,attentions
-        
-        # span_logits=self.epe(sequence_output, attention_mask)
-        # span_logits=span_logits.squeeze(dim=1)
-        # span_logits=span_logits*prompt_mask-(1-prompt_mask)*1e12
-
-        # if start_positions is not None and end_positions is not None:
-        #     loss_epe=epe_loss(start_ids=start_positions, end_ids=end_positions,
-        #                      span_logits=span_logits, loss_fun=self.BCE_loss)
-        # else:
-        #     loss_epe=None
-
-        # span_prob=self.sigmoid(span_logits)
-        # # pdb.set_trace()
-        # return UIEModelOutput(
-        #     span_prob=span_prob,
-        #     loss_epe=loss_epe,
-        #     attentions=attentions,
-        #     fuzzy_span_attentions=fuzzy_span_attentions,
-        #     span_logits=span_logits
-        # )

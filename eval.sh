@@ -1,5 +1,5 @@
 #!/usr/bin/env bash 
-export CUDA_VISIBLE_DEVICES="4"
+export CUDA_VISIBLE_DEVICES="6"
 
 # MATE evaluation 
 
@@ -15,7 +15,7 @@ export CUDA_VISIBLE_DEVICES="4"
 #         --test_ds "${TEST_DATA}" \
 #         --task MATE \
 #         --limit 0.5 \
-#         --gcn_layers 3 \
+#         --mate_gcn_layers 3 \
 #         --device cuda:0 2>&1)
 
 #     correct=$(echo "$output" | grep -o 'Correct:[0-9]*' | cut -d':' -f2)
@@ -60,60 +60,61 @@ export CUDA_VISIBLE_DEVICES="4"
 
 # MASC evaluation
 
-CHECKPOINT_DIR="./checkpoints/MASC_2017"
-TEST_DATA="/home/data/finetune_dataset/twitter17/test"
+# CHECKPOINT_DIR="./checkpoints/MASC_2017_baseft_t"
+# TEST_DATA="/home/data/finetune_dataset/twitter17/test"
 
-best_stats_values=(0 0 0 0 0 "None")  # [Correct, Label, Prediction, Accuracy, Macro_F1, Model]
-declare -r COR=0 LABEL=1 PRED=2 ACC=3 MacroF1=4 MODEL=5
+# best_stats_values=(0 0 0 0 0 "None")  # [Correct, Label, Prediction, Accuracy, Macro_F1, Model]
+# declare -r COR=0 LABEL=1 PRED=2 ACC=3 MacroF1=4 MODEL=5
  
-for model in "${CHECKPOINT_DIR}"/*.pt; do 
-    output=$(python eval_tools.py  \
-        --MASC_model "${model}" \
-        --test_ds "${TEST_DATA}" \
-        --task MASC \
-        --limit 0.5 \
-        --gcn_layers 4 \
-        --device cuda:0 2>&1)
+# for model in "${CHECKPOINT_DIR}"/*.pt; do 
+#     output=$(python eval_tools.py  \
+#         --MASC_model "${model}" \
+#         --test_ds "${TEST_DATA}" \
+#         --task MASC \
+#         --limit 0.5 \
+#         --masc_gcn_layers 4 \
+#         --device cuda:0 2>&1)
 
-    correct=$(echo "$output" | grep -o 'Correct:[0-9]*' | cut -d':' -f2)
-    label=$(echo "$output" | grep -o 'Label:[0-9]*' | cut -d':' -f2)
-    prediction=$(echo "$output" | grep -o 'Prediction:[0-9]*' | cut -d':' -f2)
-    accuracy=$(echo "$output" | grep -o 'Accuracy:[0-9.]*' | cut -d':' -f2)
-    f1=$(echo "$output" | grep -o 'Macro_f1:[0-9.]*' | cut -d':' -f2)
+#     correct=$(echo "$output" | grep -o 'Correct:[0-9]*' | cut -d':' -f2)
+#     label=$(echo "$output" | grep -o 'Label:[0-9]*' | cut -d':' -f2)
+#     prediction=$(echo "$output" | grep -o 'Prediction:[0-9]*' | cut -d':' -f2)
+#     accuracy=$(echo "$output" | grep -o 'Accuracy:[0-9.]*' | cut -d':' -f2)
+#     f1=$(echo "$output" | grep -o 'Macro_f1:[0-9.]*' | cut -d':' -f2)
 
-    echo -e "\nModel: $(basename "$model")"
-    echo "Correct    : ${correct:-N/A}"
-    echo "Label      : ${label:-N/A}"
-    echo "Prediction : ${prediction:-N/A}"
-    echo "Accuracy   : ${accuracy:-N/A}"
-    echo "Macro_f1   : ${f1:-N/A}"
+#     echo -e "\nModel: $(basename "$model")"
+#     echo "Correct    : ${correct:-N/A}"
+#     echo "Label      : ${label:-N/A}"
+#     echo "Prediction : ${prediction:-N/A}"
+#     echo "Accuracy   : ${accuracy:-N/A}"
+#     echo "Macro_f1   : ${f1:-N/A}"
 
-    if [[ "${f1:-0}" =~ ^[0-9.]+$ ]]; then
-        is_better=$(awk -v f1="$f1" -v best="${best_stats_values[$MacroF1]}" 'BEGIN { print (f1 > best) ? 1 : 0 }')
+#     if [[ "${f1:-0}" =~ ^[0-9.]+$ ]]; then
+#         is_better=$(awk -v f1="$f1" -v best="${best_stats_values[$MacroF1]}" 'BEGIN { print (f1 > best) ? 1 : 0 }')
         
-        if [ "$is_better" -eq 1 ]; then
-            best_stats_values[$COR]=${correct:-0}
-            best_stats_values[$LABEL]=${label:-0}
-            best_stats_values[$PRED]=${prediction:-0}
-            best_stats_values[$ACC]=${accuracy:-0}
-            best_stats_values[$MacroF1]=${f1:-0}
-            best_stats_values[$MODEL]=$(basename "$model")
-        fi
-    fi
-done 
+#         if [ "$is_better" -eq 1 ]; then
+#             best_stats_values[$COR]=${correct:-0}
+#             best_stats_values[$LABEL]=${label:-0}
+#             best_stats_values[$PRED]=${prediction:-0}
+#             best_stats_values[$ACC]=${accuracy:-0}
+#             best_stats_values[$MacroF1]=${f1:-0}
+#             best_stats_values[$MODEL]=$(basename "$model")
+#         fi
+#     fi
+# done 
 
-echo -e "\nBest Model: ${best_stats_values[$MODEL]}"
-echo "F1      : ${best_stats_values[$MacroF1]}"
-echo "Accuracy: ${best_stats_values[$ACC]}"
-echo "Correct : ${best_stats_values[$COR]}"
-echo "Label   : ${best_stats_values[$LABEL]}"
-echo "Prediction: ${best_stats_values[$PRED]}"
+# echo -e "\nBest Model: ${best_stats_values[$MODEL]}"
+# echo "F1      : ${best_stats_values[$MacroF1]}"
+# echo "Accuracy: ${best_stats_values[$ACC]}"
+# echo "Correct : ${best_stats_values[$COR]}"
+# echo "Label   : ${best_stats_values[$LABEL]}"
+# echo "Prediction: ${best_stats_values[$PRED]}"
 
 # MABSA evaluation
-#python eval_tools.py \
-#    --MATE_model ./checkpoints/MATE_2015/best_f1:87.737.pt \
-#    --MASC_model ./checkpoints/MASC_2015/best_f1:81.125.pt \
-#    --test_ds ./data/Twitter2015/MABSA/test \
-#    --task MABSA \
-#    --limit 0.5 \
-#    --device cuda:0
+python eval_tools.py \
+   --MATE_model /home/DASCO/checkpoints/MATE_2015/best_f1:88.389.pt \
+   --MASC_model /home/DASCO/checkpoints/MASC_2015_baseft/best_f1:73.915.pt \
+   --test_ds /home/data/finetune_dataset/twitter15/test \
+   --task MABSA \
+   --limit 0.5 \
+   --gcn_layers 3 \
+   --device cuda:0

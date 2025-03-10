@@ -6,7 +6,7 @@ from transformers import AutoModel, AutoImageProcessor
 from Text_encoder.sparse_attn_model import Text_encoder_with_epe
 from PDQ.PDQ import PDQ
 from transformers.utils import ModelOutput
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 import torch.nn as nn
 import torch
 from dataclasses import dataclass
@@ -25,7 +25,8 @@ class DASCO_Output(ModelOutput):
     n_pred: Optional[torch.LongTensor] = None
     n_label: Optional[torch.LongTensor] = None
     class_stats: Optional[Dict[int, Dict[str, torch.LongTensor]]] = None
-
+    new_batch: Optional[Any] = None
+    false_num: Optional[torch.LongTensor] = None
 
 def get_pred_span(start_ids, end_ids):
     start_list = torch.nonzero(start_ids)
@@ -144,12 +145,12 @@ class DASCO(nn.Module):
         self.fc3 = nn.Linear(self.hidden_size//2, self.hidden_size//2)
         self.fc4 = nn.Linear(self.hidden_size, self.hidden_size//2)
         self.sigmoid = nn.Sigmoid()
-        if self.task == 'MATE':
+        if self.task == 'MATE' or self.task == 'MABSA':
             self.classifier = nn.Linear(self.hidden_size*2, 2)
             self.criterion = nn.CrossEntropyLoss()
         elif self.task == 'MASC':
             self.classifier = nn.Linear(self.hidden_size*2, 3)
-            self.criterion = nn.CrossEntropyLoss(weight=torch.tensor([0.2, 0.5, 0.3]))
+            self.criterion = nn.CrossEntropyLoss(weight=torch.tensor([0.11, 0.59, 0.3]))  #  twitter15[0.11, 0.59, 0.3] twitter17: [0.14,0.46,0.4]
 
     def projection(self, z: torch.Tensor) -> torch.Tensor:
         z = F.elu(self.fc1(z))
@@ -327,15 +328,152 @@ class DASCO(nn.Module):
             predictions = torch.argmax(probs, dim=-1)
             n_correct += torch.sum((predictions == labels) & (labels == 1)).item()
             n_pred += torch.sum(predictions == 1).item()
-            n_label += torch.sum(labels == 1).item()
+            # n_label += torch.sum(labels == 1).item()
+            n_label += samples['aspects_mask'][i].size(0)
         
         if no_its_and_itm:
             loss_cls_cl = 0
         else:
             loss_classify = loss_target.mean()
             loss_cls_cl = loss_classify +  self.hyper3 * loss_cl
+        class_stats = None
+        return loss_cls_cl, n_correct, n_pred, n_label, class_stats
+    
+    def mate_test(self, samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs):
+        adj_ag = None
+        # Attention matrix
+        for i in range(self.attention_heads):
+            if adj_ag is None:
+                adj_ag = attn_adj_list[i]
+            else:
+                adj_ag = adj_ag + attn_adj_list[i]
+        adj_ag = adj_ag / self.attention_heads
 
-        return loss_cls_cl, n_correct, n_pred, n_label
+        for j in range(adj_ag.size(0)):
+            adj_ag[j] -= torch.diag(torch.diag(adj_ag[j]))
+            adj_ag[j] += torch.eye(adj_ag[j].size(0)).cuda()
+        adj_ag = text_encoder_atts.transpose(1, 2) * adj_ag
+        
+        H_l = gcn_inputs
+        for l in range(self.layers):
+            si = nn.Sigmoid()
+            # **********GCN*********
+            AH_sem = adj_ag.bmm(H_l)
+            I_sem = self.semW[l](AH_sem) #SemGCN
+            AH_dep = samples['adj_matrix'].bmm(H_l)
+            I_dep = self.depW[l](AH_dep) #depGCN
+
+            g = si(I_dep)
+            I_dep_g = self.hyper1 * g # [B, S, 768/2]
+            I_com = torch.mul((1-I_dep_g),I_sem) + torch.mul(I_dep_g,I_dep) # adaptive fusion
+            relu = nn.ReLU()
+            H_out = relu(self.fc3(I_com))
+            
+            if l == 0:
+                H_l = self.fc4(H_l)
+            g_l = si(H_l)
+            H_l = torch.mul(g_l, H_out) + torch.mul((1 - g_l),H_l)
+
+        # span-masked graphCL
+        h1 = self.projection(H_l)
+        h2 = self.projection(I_sem)  #[B,s,D/2]
+
+        n_correct = 0
+        n_pred = 0
+        n_label = 0
+        res = []
+        false_num = 0
+        for i in range(len(samples['nouns_mask'])):  # B
+            asp_wn_ori = samples['nouns_mask'][i].sum(dim=-1).unsqueeze(-1).to(h1.device) # [N,1]
+            asp_wn_ori = torch.clamp(asp_wn_ori, min=1.0)
+            n_mask_ori = samples['nouns_mask'][i].unsqueeze(-1).repeat(1, 1, self.hidden_size // 2).to(h1.device)  # [N,S,D/2]
+            h1_expanded = h1[i].unsqueeze(0)  # [1, S, D/2]
+            h2_expanded = h2[i].unsqueeze(0)  # [1, S, D/2]
+            masked_h1 = h1_expanded * n_mask_ori  # [N, S, D/2]
+            masked_h2 = h2_expanded * n_mask_ori  # [N, S, D/2]
+            summed_h1 = masked_h1.sum(dim=1)  # [N, D/2]   
+            summed_h2 = masked_h2.sum(dim=1)  # [N, D/2]
+            outputs1 = summed_h1 / asp_wn_ori  # [N, D/2]
+            outputs2 = summed_h2 / asp_wn_ori  # [N, D/2]
+            final_outputs = torch.cat((outputs1, outputs2, pooled_output[i].repeat(outputs2.size(0), 1)), dim=-1)
+            logits = self.classifier(final_outputs)  # [N, 2]
+            
+            labels = samples['noun_targets'][i].to(h1.device)
+            probs = torch.softmax(logits, dim=-1)
+            predictions = torch.argmax(probs, dim=-1)
+            n_correct += torch.sum((predictions == labels) & (labels == 1)).item()
+            n_pred += torch.sum(predictions == 1).item()
+            n_label += samples['aspects_mask'][i].size(0)
+
+            new_batch_aspects_mask = []
+            new_batch_aspects_scope = []
+            new_batch_aspect_targets = []
+            # print(f"i={i}, nouns_mask[i] length: {len(samples['nouns_mask'][i])}")
+            # print(f"i={i}, nouns_scope[i] length: {len(samples['nouns_scope'][i])}")
+            for j in range(len(predictions)):  # N
+                if predictions[j] == 1 and labels[j] == 1:
+                    for k in range(len(samples['aspects_mask'][i])):  # aspect num = k != j
+                        if torch.all(samples['aspects_mask'][i][k] == samples['nouns_mask'][i][j]):
+                            new_batch_aspects_mask.append(samples['aspects_mask'][i][k])
+                            try:
+                                new_batch_aspects_scope.append(samples['aspects_scope'][i][k])
+                            except:
+                                new_batch_aspects_scope.append(samples['aspects_mask'][i][k])
+                            new_batch_aspect_targets.append(samples['aspect_targets'][i][k])
+                elif predictions[j] == 1 and labels[j] == 0:
+                    new_batch_aspects_mask.append(samples['nouns_mask'][i][j])
+                    try:
+                        new_batch_aspects_scope.append(samples['nouns_scope'][i][j])
+                    except:
+                        new_batch_aspects_scope.append(samples['nouns_mask'][i][j])
+                    new_batch_aspect_targets.append(1)  # 这里有问题
+                    false_num += 1
+            
+            if new_batch_aspects_mask == []:
+                continue
+            new_batch_aspects_mask = torch.stack(new_batch_aspects_mask, dim=0)
+            new_batch_aspects_scope = torch.stack(new_batch_aspects_scope, dim=0)
+            new_batch_aspect_targets = torch.tensor(new_batch_aspect_targets, device=h1.device)
+            
+            new_batch_sgids = samples['scene_graph']['input_ids'][i]
+            new_batch_sg_attention_mask = samples['scene_graph']['attention_mask'][i]
+            scene_captioning = {
+                'input_ids': new_batch_sgids,
+                'attention_mask': new_batch_sg_attention_mask
+            }
+
+            new_batch_inputids = samples['IE_inputs']['input_ids'][i]
+            new_batch_attention_mask = samples['IE_inputs']['attention_mask'][i]
+            text_input = {
+                'input_ids': new_batch_inputids,
+                'attention_mask': new_batch_attention_mask
+            }
+            
+            res.append([samples['image_embeds'][i], samples['query_inputs'][i], scene_captioning, text_input, 
+                   new_batch_aspects_mask, new_batch_aspects_scope, samples['adj_matrix'][i], new_batch_aspect_targets])
+        
+        image_embeds=torch.stack([b[0] for b in res], dim=0)
+        query_inputs=torch.stack([b[1] for b in res], dim=0)
+        scene_graph={
+                        "input_ids":torch.stack([b[2]["input_ids"][0] for b in res], dim=0),
+                        "attention_mask":torch.stack([b[2]["attention_mask"][0] for b in res], dim=0)
+                        }
+        IE_inputs={
+                    "input_ids":torch.stack([b[3]["input_ids"] for b in res], dim=0),
+                    "attention_mask":torch.stack([b[3]["attention_mask"] for b in res], dim=0)
+                        }
+
+        aspects_mask=[b[4] for b in res]
+        aspects_scope=[b[5] for b in res]
+        adj_matrix=torch.stack([b[6] for b in res], dim=0)
+        aspect_targets=[b[7] for b in res]
+        
+        new_batch = {'image_embeds': image_embeds, 'query_inputs': query_inputs, 'scene_graph': scene_graph, 
+                     'IE_inputs': IE_inputs, 'aspects_mask': aspects_mask, 'aspects_scope': aspects_scope, 
+                     'adj_matrix': adj_matrix, 'aspect_targets': aspect_targets}
+        loss_cls_cl = 0
+        class_stats = None
+        return loss_cls_cl, n_correct, n_pred, n_label, new_batch, class_stats, false_num
     
     def masc_cl_loss(self, samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs):
         adj_ag = None
@@ -447,18 +585,12 @@ class DASCO(nn.Module):
         text_attn = torch.ones(query_outputs.size()[:-1], dtype=torch.long).to(query_outputs.device)
         text_input_ids = samples['IE_inputs']['input_ids']
         text_att_mask = samples['IE_inputs']['attention_mask']
-        start_ids = samples["start_ids"]  # torch.Size([6, 512])
-        end_ids = samples["end_ids"]  # torch.Size([6, 512])
-        prompt_mask = samples["prompt_mask"]  # torch.Size([6, 512, 512])
         text_encoder_atts = torch.cat([text_attn, text_att_mask], dim=1)  # torch.Size([6, 512])
         text_inputs_embeds = self.text_encoder.encoder.embeddings(input_ids=text_input_ids)
         text_inputs_embeds = torch.cat([query_outputs, text_inputs_embeds], dim=1)  # torch.Size([6, 512, 768])
 
         sequence_output,pooled_output,_ = self.text_encoder(inputs_embeds= text_inputs_embeds, 
-                                          attention_mask=text_encoder_atts,
-                                          start_positions=start_ids,
-                                          end_positions=end_ids,
-                                          prompt_mask=prompt_mask)
+                                          attention_mask=text_encoder_atts)
         
         gcn_inputs = sequence_output
         pooled_output = self.pooled_drop(pooled_output)
@@ -467,11 +599,14 @@ class DASCO(nn.Module):
         attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(attn_tensor, 1, dim=1)]
 
         if self.task == "MATE":
-            loss_cls_cl, n_correct, n_pred, n_label = self.mate_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
+            loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.mate_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
+            false_num = 0
         elif self.task == "MASC":
             loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
-        elif self.task == "JMASA":
-            loss_cls_cl = 0
+            new_batch = None
+            false_num = 0
+        elif self.task == "MABSA":
+            loss_cls_cl, n_correct, n_pred, n_label, new_batch, class_stats, false_num = self.mate_test(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
 
         total_loss = (self.itc_weight * PQformer_outputs.loss_itc
                       + self.itm_weight * PQformer_outputs.loss_itm
@@ -488,7 +623,9 @@ class DASCO(nn.Module):
             n_correct = n_correct,
             n_pred = n_pred,
             n_label = n_label,
-            class_stats = class_stats
+            class_stats = class_stats,
+            new_batch = new_batch,
+            false_num = false_num
         )
 
 
