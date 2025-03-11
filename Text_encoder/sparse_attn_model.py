@@ -4,9 +4,9 @@ from transformers import BertModel, BertPreTrainedModel, PretrainedConfig
 from typing import Optional
 from fsa import FSA_layer
 
-class Text_encoder_with_epe(BertPreTrainedModel):
+class Text_encoder(BertPreTrainedModel):
     def __init__(self, config: PretrainedConfig):
-        super(Text_encoder_with_epe, self).__init__(config)
+        super(Text_encoder, self).__init__(config)
         self.encoder = BertModel(config)
         self.config = config
         hidden_size = self.config.hidden_size

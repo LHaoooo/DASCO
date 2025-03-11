@@ -2,7 +2,7 @@ import sys
 sys.path.append('Text_encoder')
 sys.path.append('PDQ')
 from transformers import BertTokenizerFast
-from Text_encoder.sparse_attn_model import Text_encoder_with_epe
+from Text_encoder.sparse_attn_model import Text_encoder
 from PDQ.PDQ import PDQ
 from transformers.utils import ModelOutput
 from typing import Optional, Dict, Any
@@ -81,7 +81,7 @@ class DASCO(nn.Module):
     def __init__(self, args, MFSUIE_config):
         super().__init__()
         self.pdq = PDQ()
-        self.text_encoder = Text_encoder_with_epe.from_pretrained(MFSUIE_config['text_model']["model_path"])
+        self.text_encoder = Text_encoder.from_pretrained(MFSUIE_config['text_model']["model_path"])
         self.tokenizer = build_tokenizer(MFSUIE_config["text_model"]["tokenizer_path"])
         
         Qformer_hidden_size = MFSUIE_config["pdq"]["hidden_size"]
