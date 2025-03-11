@@ -1,5 +1,5 @@
 #!/usr/bin/env bash 
-export CUDA_VISIBLE_DEVICES="6"
+export CUDA_VISIBLE_DEVICES="7"
 
 # MATE evaluation 
 
@@ -14,7 +14,6 @@ export CUDA_VISIBLE_DEVICES="6"
 #         --MATE_model "${model}" \
 #         --test_ds "${TEST_DATA}" \
 #         --task MATE \
-#         --limit 0.5 \
 #         --mate_gcn_layers 3 \
 #         --device cuda:0 2>&1)
 
@@ -71,7 +70,6 @@ export CUDA_VISIBLE_DEVICES="6"
 #         --MASC_model "${model}" \
 #         --test_ds "${TEST_DATA}" \
 #         --task MASC \
-#         --limit 0.5 \
 #         --masc_gcn_layers 4 \
 #         --device cuda:0 2>&1)
 
@@ -115,6 +113,5 @@ python eval_tools.py \
    --MASC_model /home/DASCO/checkpoints/MASC_2015_baseft/best_f1:73.915.pt \
    --test_ds /home/data/finetune_dataset/twitter15/test \
    --task MABSA \
-   --limit 0.5 \
    --gcn_layers 3 \
    --device cuda:0

@@ -93,10 +93,7 @@ def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,s
                 batch["scene_graph"]['attention_mask'] = batch["scene_graph"]['attention_mask'].to(device)  # [128, 512]
                 batch["IE_inputs"]['input_ids'] = batch["IE_inputs"]['input_ids'].to(device)
                 batch["IE_inputs"]['attention_mask'] = batch["IE_inputs"]['attention_mask'].to(device)
-                batch["start_ids"]=batch["start_ids"].to(device)
-                batch["end_ids"]=batch["end_ids"].to(device)
                 batch["adj_matrix"]=batch["adj_matrix"].to(device)
-                batch["prompt_mask"]=batch["prompt_mask"].to(device)
                 step+=1
                 with maybe_autocast(model=model):
                     model_output=model(batch)
@@ -114,11 +111,10 @@ def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,s
 
                 if step%val_step==0:
                     accelerator.wait_for_everyone()
-                    limit=0.1
                     del batch
                     # torch.cuda.empty_cache()
                     accelerator.wait_for_everyone()
-                    eval_res=eval_MASC(model,eval_dataloader,limit,device)
+                    eval_res=eval_MASC(model,eval_dataloader,device)
                     accelerator.wait_for_everyone()
 
                     total_correct=accelerator.gather(eval_res[0]).sum()

@@ -10,19 +10,11 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 from transformers import BertTokenizer
 import pdb
 from tqdm import tqdm
-from PIL import Image
-import os.path as osp
 import pickle
-import random
 import json
-
-def get_tgt(target,tokenizer):
-    tgt_list = [tokenizer.encode(x, add_special_tokens=False) for x in target]
-    return tgt_list
 
 def get_span(target,input_ids,tokenizer):
     # 假设已有tokenizer和input_ids
-
     # 将待搜索字符串转换为token并获取其长度
     tgt_tokens = tokenizer.encode(target, add_special_tokens=False)
     tgt_token_len = len(tgt_tokens)
@@ -357,41 +349,12 @@ class twitter_dataset(Dataset):
                     "attention_mask":IE_inputs["attention_mask"]
         }
 
-        # start_ids and end_ids
-        start_ids = torch.zeros(self.max_seq_len).int()
-        end_ids = torch.zeros(self.max_seq_len).int()
-        if isinstance(self.data[index]["target"],list):
-            for i in self.data[index]["target"]:
-                start_pos_list,end_pos_list=get_span(target=i,
-                                            input_ids=IE_inputs["input_ids"],
-                                            tokenizer=self.IE_tokenizer)
-                for j in range(len(start_pos_list)):
-                    if (not start_ids[start_pos_list[j]+self.num_query_token]==1) and (not end_ids[end_pos_list[j]+self.num_query_token]==1):
-                        start_ids[start_pos_list[j]+self.num_query_token]=1
-                        end_ids[end_pos_list[j]+self.num_query_token] = 1
-        else:
-            start_pos_list, end_pos_list=get_span(self.data[index]["target"],
-                                            input_ids=IE_inputs["input_ids"],
-                                            tokenizer=self.IE_tokenizer)
-            for start_pos in start_pos_list:
-                start_ids[start_pos+self.num_query_token] = 1
-            for end_pos in end_pos_list:
-                end_ids[end_pos+self.num_query_token] = 1
-
         prompt_length_stoken = calculate_cls_sep_length(IE_inputs, self.IE_tokenizer)
         left_tokens_len = self.num_query_token + prompt_length_stoken
         parse_info = ParseData(self.data[index], self.max_seq_len, left_tokens_len)
         
         # aspect mask for each aspect
         aspects_mask = []
-        # for aspect_item in parse_info['aspects_item']:
-        #     aspect_mask = torch.zeros(self.max_seq_len).int()
-        #     start_pos_list,end_pos_list=get_span(target=aspect_item['aspect'],
-        #                                     input_ids=IE_inputs["input_ids"],
-        #                                     tokenizer=self.IE_tokenizer)
-        #     for j in range(len(start_pos_list)):
-        #         aspect_mask[start_pos_list[j]+self.num_query_token: end_pos_list[j]+self.num_query_token+1]=1
-        #     aspects_mask.append(aspect_mask)
         if isinstance(self.data[index]["target"],list):
             for i in self.data[index]["target"]:
                 aspect_mask = torch.zeros(self.max_seq_len).int()
@@ -515,32 +478,7 @@ class twitter_dataset(Dataset):
             aspect_targets.append(a_target)
         aspect_targets = torch.tensor(aspect_targets)
 
-        res=[image_feature, query_inputs, scene_graph, IE_inputs, start_ids, end_ids, aspects_mask, aspects_scope, nouns_mask, nouns_scope, adj_matrix, noun_targets, aspect_targets]
-
-        # label
-        if self.with_label:
-            res.append(self.label_data[index])
-        else:
-            res.append(None)
-        
-        # prompt mask  将MATE和MASC都看作是词提取任务
-        if self.with_prompt_mask:
-            if "[ positive, neutral, negative ]" in self.data[index]["query_input"]:
-                prompt_target="[ positive, neutral, negative ]"
-            else:
-                prompt_target=self.data[index]["text_input"]
-
-            prompt_mask = torch.zeros(self.max_seq_len,self.max_seq_len).int()
-            prompt_start_list,prompt_end_list=get_span(prompt_target,
-                                            input_ids=IE_inputs["input_ids"],
-                                            tokenizer=self.IE_tokenizer)
-            for start_pos,end_pos in zip(prompt_start_list,prompt_end_list):
-                prompt_mask[start_pos+self.num_query_token:end_pos+self.num_query_token+1,
-                            start_pos+self.num_query_token:end_pos+self.num_query_token+1]=1
-            res.append(prompt_mask)
-        else:
-            res.append(None)
-
+        res=[image_feature, query_inputs, scene_graph, IE_inputs, aspects_mask, aspects_scope, nouns_mask, nouns_scope, adj_matrix, noun_targets, aspect_targets]
         return tuple(res)
 
     def __len__(self):
@@ -558,34 +496,21 @@ def collate_fn(batch):
                 "input_ids":torch.stack([b[3]["input_ids"] for b in batch], dim=0),
                 "attention_mask":torch.stack([b[3]["attention_mask"] for b in batch], dim=0)
                     }
-    start_ids=torch.stack([b[4] for b in batch], dim=0)
-    end_ids=torch.stack([b[5] for b in batch], dim=0)
 
-    aspects_mask=[b[6] for b in batch]
-    aspects_scope=[b[7] for b in batch]
-    nouns_mask=[b[8] for b in batch]
-    nouns_scope=[b[9] for b in batch]
+    aspects_mask=[b[4] for b in batch]
+    aspects_scope=[b[5] for b in batch]
+    nouns_mask=[b[6] for b in batch]
+    nouns_scope=[b[7] for b in batch]
 
-    adj_matrix=torch.stack([b[10] for b in batch], dim=0)
+    adj_matrix=torch.stack([b[8] for b in batch], dim=0)
 
-    noun_targets=[b[11] for b in batch]
-    aspect_targets=[b[12] for b in batch]
+    noun_targets=[b[9] for b in batch]
+    aspect_targets=[b[10] for b in batch]
 
     sample={"image_embeds":image_embeds,"query_inputs":query_inputs,"scene_graph":scene_graph,"IE_inputs":IE_inputs,
-            "start_ids":start_ids,"end_ids":end_ids,"aspects_mask":aspects_mask,"aspects_scope":aspects_scope,
-            "nouns_mask":nouns_mask,"nouns_scope":nouns_scope,"adj_matrix":adj_matrix,"noun_targets":noun_targets, 
+            "aspects_mask":aspects_mask,"aspects_scope":aspects_scope,"nouns_mask":nouns_mask,
+            "nouns_scope":nouns_scope,"adj_matrix":adj_matrix,"noun_targets":noun_targets, 
             "aspect_targets":aspect_targets}
-    
-    try:
-        if batch[0][13]!=None:
-            label_data=[x[13] for x in batch ]
-            sample["label_data"]=label_data
-    except:
-        pdb.set_trace()
-
-    if batch[0][14]!=None:
-        prompt_mask=torch.stack([b[14] for b in batch], dim=0)
-        sample["prompt_mask"]=prompt_mask
     
     return sample
 

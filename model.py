@@ -2,11 +2,10 @@ import sys
 sys.path.append('Text_encoder')
 sys.path.append('PDQ')
 from transformers import BertTokenizerFast
-from transformers import AutoModel, AutoImageProcessor
 from Text_encoder.sparse_attn_model import Text_encoder_with_epe
 from PDQ.PDQ import PDQ
 from transformers.utils import ModelOutput
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 import torch.nn as nn
 import torch
 from dataclasses import dataclass
@@ -27,24 +26,6 @@ class DASCO_Output(ModelOutput):
     class_stats: Optional[Dict[int, Dict[str, torch.LongTensor]]] = None
     new_batch: Optional[Any] = None
     false_num: Optional[torch.LongTensor] = None
-
-def get_pred_span(start_ids, end_ids):
-    start_list = torch.nonzero(start_ids)
-    end_list = torch.nonzero(end_ids)
-    start_list = [x[0] - 32 for x in start_list]
-    end_list = [x[0] - 32 + 1 for x in end_list]
-    text_span = []
-    if len(start_list) == 0 or len(end_list) == 0:
-        return []
-    i = 0
-    j = 0
-    while i < len(start_list) and j < len(end_list):
-        if start_list[i] < end_list[j]:
-            text_span.append([start_list[i], start_list[i]])
-            i += 1
-        else:
-            j += 1
-    return text_span
 
 def build_tokenizer(tokenizer_path):
     tokenizer = BertTokenizerFast.from_pretrained(tokenizer_path)
@@ -252,7 +233,7 @@ class DASCO(nn.Module):
         # Attention matrix
         for i in range(self.attention_heads):
             if adj_ag is None:
-                adj_ag = attn_adj_list[i]
+                adj_ag = attn_adj_list[i].clone()
             else:
                 adj_ag = adj_ag + attn_adj_list[i]
         adj_ag = adj_ag / self.attention_heads
@@ -264,8 +245,9 @@ class DASCO(nn.Module):
         adj_ag = text_encoder_atts.transpose(1, 2) * adj_ag
         
         H_l = gcn_inputs
+        si = nn.Sigmoid()
+        relu = nn.ReLU()
         for l in range(self.layers):
-            si = nn.Sigmoid()
             # **********GCN*********
             AH_sem = adj_ag.bmm(H_l)
             I_sem = self.semW[l](AH_sem) #SemGCN
@@ -275,7 +257,6 @@ class DASCO(nn.Module):
             g = si(I_dep)
             I_dep_g = self.hyper1 * g # [B, S, 768/2]
             I_com = torch.mul((1-I_dep_g),I_sem) + torch.mul(I_dep_g,I_dep) # adaptive fusion
-            relu = nn.ReLU()
             H_out = relu(self.fc3(I_com))
             
             if l == 0:
@@ -600,6 +581,7 @@ class DASCO(nn.Module):
 
         if self.task == "MATE":
             loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.mate_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
+            new_batch = None
             false_num = 0
         elif self.task == "MASC":
             loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)

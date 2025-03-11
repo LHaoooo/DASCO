@@ -41,7 +41,7 @@ def compute_metric(total_correct,total_label,total_pred):
     f1=(2 * (precision * recall) / (precision + recall)) if total_correct else 0.0
     return precision,recall,f1
     
-def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,save_step,val_step,batch_size,save_path,device,accumulation_steps,scheduler=None,eval_dataset=None):
+def finetune(accelerator,model, optimizer, train_dataset, num_epoch, log_step, save_step, val_step, batch_size, save_path, device,accumulation_steps,scheduler=None,eval_dataset=None):
 
     torch.autograd.set_detect_anomaly(True)
 
@@ -78,10 +78,7 @@ def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,s
                 batch["scene_graph"]['attention_mask'] = batch["scene_graph"]['attention_mask'].to(device)  # [128, 512]
                 batch["IE_inputs"]['input_ids'] = batch["IE_inputs"]['input_ids'].to(device)
                 batch["IE_inputs"]['attention_mask'] = batch["IE_inputs"]['attention_mask'].to(device)
-                batch["start_ids"]=batch["start_ids"].to(device)
-                batch["end_ids"]=batch["end_ids"].to(device)
                 batch["adj_matrix"]=batch["adj_matrix"].to(device)
-                batch["prompt_mask"]=batch["prompt_mask"].to(device)
                 step+=1
                 with maybe_autocast(model=model):
                     model_output=model(batch)
@@ -99,11 +96,10 @@ def finetune(accelerator,model, optimizer,  train_dataset, num_epoch, log_step,s
 
                 if step%val_step==0:
                     accelerator.wait_for_everyone()
-                    limit=0.1
                     del batch
                     # torch.cuda.empty_cache()
                     accelerator.wait_for_everyone()
-                    eval_res=eval_MATE(model,eval_dataloader,limit,device)
+                    eval_res=eval_MATE(model,eval_dataloader,device)
                     accelerator.wait_for_everyone()
 
                     total_correct=accelerator.gather(eval_res[0]).sum()
@@ -166,8 +162,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, default=None)
-    parser.add_argument('--base_model', type=str, default="./Text_encoder/model_best", )
-    parser.add_argument('--pretrain_model', type=str, default="./Text_encoder/model_best", )
+    parser.add_argument('--base_model', type=str, default="./Text_encoder/model_best")
+    parser.add_argument('--pretrain_model', type=str, default="./Text_encoder/model_best")
 
     parser.add_argument('--train_ds', type=str, default="/home/data/finetune_dataset/twitter15/train.pkl")
     parser.add_argument('--eval_ds', type=str, default="/home/data/finetune_dataset/twitter15/dev.pkl")
@@ -226,10 +222,10 @@ if __name__ == "__main__":
     model.lm_weight=args.lm
     model.cl_weight=args.cl
 
-    for param in model.pdq.parameters():
-        param.requires_grad=False
-    for param in model.text_encoder.parameters():
-        param.requires_grad=False
+    # for param in model.pdq.parameters():
+    #     param.requires_grad=False
+    # for param in model.text_encoder.parameters():
+    #     param.requires_grad=False
 
     optimizer = AdamW(params=filter(lambda p: p.requires_grad, model.parameters()),
                 lr=args.lr, betas=(0.9, 0.98), weight_decay=0.05)
