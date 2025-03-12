@@ -2,7 +2,7 @@ import torch
 import argparse
 import contextlib
 import torch
-from dataset import collate_fn, twitter_dataset,get_span
+from dataset import collate_fn, twitter_dataset
 from tqdm import tqdm
 
 def compute_metric(total_correct,total_label,total_pred):
@@ -13,14 +13,14 @@ def compute_metric(total_correct,total_label,total_pred):
 
 def compute_metric_macro(total_correct,total_label,merged=None):
     classes = [0, 1, 2]
-    Accuracy=total_correct/total_label if total_correct else 0.0
+    Accuracy=total_correct/total_label if total_label else 0.0
 
     # 计算macro F1 
     f1_scores = []
     for cls in classes:
-        tp = merged[cls]['tp'].sum().item()
-        fp = merged[cls]['fp'].sum().item()
-        fn = merged[cls]['fn'].sum().item()
+        tp = merged[cls]['tp'].item()
+        fp = merged[cls]['fp'].item()
+        fn = merged[cls]['fn'].item()
  
         # 处理除零保护 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0 
@@ -83,8 +83,7 @@ def eval_MASC(model,dataloader,device='cpu'):
             batch["adj_matrix"]=batch["adj_matrix"].to(device)
 
             with maybe_autocast(model):
-                with torch.no_grad():
-                    output = model(batch,no_its_and_itm=True)
+                output = model(batch,no_its_and_itm=True)
             
             total_correct += output.n_correct
             total_pred += output.n_pred
@@ -95,9 +94,9 @@ def eval_MASC(model,dataloader,device='cpu'):
                 merged[cls]['fn'] += output.class_stats[cls]['fn']
     
     for cls in classes:
-        merged[cls]['tp'] = torch.tensor(merged[cls]['tp']).to(device)
-        merged[cls]['fp'] = torch.tensor(merged[cls]['fp']).to(device)
-        merged[cls]['fn'] = torch.tensor(merged[cls]['fn']).to(device)
+        merged[cls]['tp'] = torch.tensor(merged[cls]['tp'], device=device)
+        merged[cls]['fp'] = torch.tensor(merged[cls]['fp'], device=device)
+        merged[cls]['fn'] = torch.tensor(merged[cls]['fn'], device=device)
             
     model.train()
     return torch.tensor(total_correct).to(device),torch.tensor(total_label).to(device),torch.tensor(total_pred).to(device), merged

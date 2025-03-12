@@ -111,15 +111,11 @@ class DASCO(nn.Module):
         for layer in range(self.layers):
             input_dim = text_hidden_size if layer == 0 else self.mem_dim
             self.depW.append(nn.Linear(input_dim, self.mem_dim))
-            # input_dim = self.hidden_size
-            # self.depW.append(nn.Linear(input_dim, input_dim))
             
         self.semW = nn.ModuleList()  # SemGCN语义GCN
         for j in range(self.layers):
             input_dim = text_hidden_size if j == 0 else self.mem_dim
             self.semW.append(nn.Linear(input_dim, self.mem_dim))
-            # input_dim = self.hidden_size
-            # self.semW.append(nn.Linear(input_dim, input_dim))
         
         self.fc1 = torch.nn.Linear(self.hidden_size//2, 32)
         self.fc2 = torch.nn.Linear(32, self.hidden_size//2)
@@ -131,7 +127,7 @@ class DASCO(nn.Module):
             self.criterion = nn.CrossEntropyLoss()
         elif self.task == 'MASC':
             self.classifier = nn.Linear(self.hidden_size*2, 3)
-            self.criterion = nn.CrossEntropyLoss(weight=torch.tensor([0.11, 0.59, 0.3]))  #  twitter15[0.11, 0.59, 0.3] twitter17: [0.14,0.46,0.4]
+            self.criterion = nn.CrossEntropyLoss(weight=torch.tensor([0.14,0.46,0.4]))  #  twitter15[0.11, 0.59, 0.3] twitter17: [0.14,0.46,0.4]
 
     def projection(self, z: torch.Tensor) -> torch.Tensor:
         z = F.elu(self.fc1(z))
@@ -258,6 +254,7 @@ class DASCO(nn.Module):
             I_dep_g = self.hyper1 * g # [B, S, 768/2]
             I_com = torch.mul((1-I_dep_g),I_sem) + torch.mul(I_dep_g,I_dep) # adaptive fusion
             H_out = relu(self.fc3(I_com))
+            # H_out = nn.LayerNorm(H_out.size(-1), device=H_out.device)(H_out)
             
             if l == 0:
                 H_l = self.fc4(H_l)
@@ -307,7 +304,7 @@ class DASCO(nn.Module):
             labels = samples['noun_targets'][i].to(h1.device)
             probs = torch.softmax(logits, dim=-1)
             predictions = torch.argmax(probs, dim=-1)
-            n_correct += torch.sum((predictions == labels) & (labels == 1)).item()
+            n_correct += torch.sum(torch.logical_and(predictions == labels, labels == 1)).item()
             n_pred += torch.sum(predictions == 1).item()
             # n_label += torch.sum(labels == 1).item()
             n_label += samples['aspects_mask'][i].size(0)
@@ -382,7 +379,7 @@ class DASCO(nn.Module):
             labels = samples['noun_targets'][i].to(h1.device)
             probs = torch.softmax(logits, dim=-1)
             predictions = torch.argmax(probs, dim=-1)
-            n_correct += torch.sum((predictions == labels) & (labels == 1)).item()
+            n_correct += torch.sum(torch.logical_and(predictions == labels, labels == 1)).item()
             n_pred += torch.sum(predictions == 1).item()
             n_label += samples['aspects_mask'][i].size(0)
 
@@ -541,13 +538,15 @@ class DASCO(nn.Module):
             labels = samples['aspect_targets'][i].to(h1.device)
             predictions = torch.argmax(logits, dim=-1)  # [N]
 
-            for prediction, label in zip(predictions, labels):
-                for cls in classes:
-                    class_stats[cls]['tp'] += ((prediction == cls) & (label == cls)).sum().item()
-                    class_stats[cls]['fp'] += ((prediction == cls) & (label != cls)).sum().item()
-                    class_stats[cls]['fn'] += ((prediction != cls) & (label == cls)).sum().item()
+            for cls in classes:
+                tp_mask = (predictions == cls) and (labels == cls)
+                fp_mask = (predictions == cls) and (labels != cls)
+                fn_mask = (predictions != cls) and (labels == cls)
+                class_stats[cls]['tp'] += torch.sum(tp_mask).item() 
+                class_stats[cls]['fp'] += torch.sum(fp_mask).item() 
+                class_stats[cls]['fn'] += torch.sum(fn_mask).item()
 
-            n_correct += (predictions == labels).sum().item()
+            n_correct += torch.sum(predictions == labels).item()
             n_pred += samples['aspects_mask'][i].size(0)
             n_label += samples['aspects_mask'][i].size(0)
         
