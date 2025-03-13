@@ -1,13 +1,12 @@
 #!/usr/bin/env bash 
 export CUDA_VISIBLE_DEVICES="7"
-
-# MATE evaluation 
 # python eval_tools.py \
-#    --MATE_model /home/DASCO/checkpoints/MATE_2017_baseft_bestnow/best_f1:95.944.pt \
+#    --MASC_model /home/DASCO/checkpoints/MASC_2017_baseft_t0/best_f1:50.025.pt \
 #    --test_ds /home/data/finetune_dataset/twitter17/test \
-#    --task MATE \
+#    --task MASC \
 #    --gcn_layers 4 \
 #    --device cuda:0
+# MATE evaluation 
 
 # CHECKPOINT_DIR="/home/DASCO/checkpoints/MATE_2015_baseft_bestnow"
 # TEST_DATA="/home/data/finetune_dataset/twitter15/test"
@@ -65,8 +64,8 @@ export CUDA_VISIBLE_DEVICES="7"
 
 # MASC evaluation
 
-CHECKPOINT_DIR="./checkpoints/MASC_2015_baseft_t"
-TEST_DATA="/home/data/finetune_dataset/twitter15/test"
+CHECKPOINT_DIR="./checkpoints/MASC_2017_baseft_t0"
+TEST_DATA="/home/data/finetune_dataset/twitter17/test"
 
 best_stats_values=(0 0 0 0 0 "None")  # [Correct, Label, Prediction, Accuracy, Macro_F1, Model]
 declare -r COR=0 LABEL=1 PRED=2 ACC=3 MacroF1=4 MODEL=5

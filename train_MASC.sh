@@ -17,7 +17,7 @@ accelerate launch --config_file deepspeed_ddp.json MASC_finetune.py \
     --itm 0 \
     --lm  0 \
     --cl  1.0 \
-    --save_path ./checkpoints/MASC_2017_baseft_t0 \
+    --save_path ./checkpoints/MASC_2017_test \
     --epoch 50 \
     --log_step 1 \
     --save_step 200 \

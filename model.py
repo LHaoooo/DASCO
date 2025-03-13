@@ -76,6 +76,58 @@ class MultiHeadAttention(nn.Module):
                              for l, x in zip(self.linears, (query, key))]
         attn = attention(query, key, mask=mask, dropout=self.dropout)
         return attn
+    
+class MultiHeadAttention1(nn.Module):
+
+    def __init__(self, h, d_model, dropout=0.1):
+        super(MultiHeadAttention1, self).__init__()
+        assert d_model % h == 0
+        self.d_k = d_model // h
+        self.h = h
+        self.linears = clones(nn.Linear(d_model, d_model), 2)
+        self.dropout = nn.Dropout(p=dropout)
+        self.d_model = d_model
+        self.weight_m = nn.Parameter(torch.Tensor(self.h, self.d_k, self.d_k))
+        self.query = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.bias = nn.Parameter(torch.Tensor(1))
+        self.dense = nn.Linear(d_model, self.d_k)
+    
+    def attention(self, query, key, mask, dropout):
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.d_k)
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e4)
+
+        s_attn = F.softmax(scores, dim=-1)
+        if dropout is not None:
+            s_attn = dropout(s_attn)
+
+        return s_attn
+    
+    def aspect_attention(self, key, aspect, aspect_mask):
+        aspect = self.query(aspect)
+        new_aspect_shape = aspect.shape[:2] + (self.h, self.d_k,)
+        aspect = aspect.view(new_aspect_shape)
+        aspect = aspect.permute(0, 2, 1, 3)
+
+        aspect_raw_scores = torch.matmul(aspect, key.transpose(-2, -1))
+        aspect_mask = aspect_mask[:,:,0].unsqueeze(1).unsqueeze(-1).repeat(1, self.h, 1, 1)
+        aspect_raw_scores = (aspect_raw_scores + self.bias) * aspect_mask
+        aspect_scores = torch.sigmoid(aspect_raw_scores)
+        
+        return aspect_scores
+    
+    def forward(self, query, key, mask, aspect, aspect_mask):
+        mask = mask[:, :, :query.size(1)]
+        if mask is not None:
+            mask = mask.unsqueeze(1)
+        nbatches = query.size(0)
+        query, key = [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+                      for l, x in zip(self.linears, (query, key))]
+        aspect_scores = None
+        aspect_scores = self.aspect_attention(key, aspect, aspect_mask)
+        self_attn = self.attention(query, key, mask, self.dropout)
+
+        return aspect_scores, self_attn
 
 class DASCO(nn.Module):
     def __init__(self, args, MFSUIE_config):
@@ -100,9 +152,10 @@ class DASCO(nn.Module):
         self.hyper3 = args.hyper3
         self.layers = args.gcn_layers
 
-        self.attention_heads = 8
+        self.attention_heads = 1
         self.mem_dim = self.hidden_size // 2
-        self.attn = MultiHeadAttention(self.attention_heads, self.hidden_size)
+        # self.attn = MultiHeadAttention(self.attention_heads, self.hidden_size)
+        self.attn = MultiHeadAttention1(self.attention_heads, self.hidden_size)
         self.layernorm = LayerNorm(self.hidden_size)
         self.pooled_drop = nn.Dropout(0.3)
         
@@ -126,6 +179,9 @@ class DASCO(nn.Module):
             self.classifier = nn.Linear(self.hidden_size*2, 2)
             self.criterion = nn.CrossEntropyLoss()
         elif self.task == 'MASC':
+            self.gcn_drop = nn.Dropout(0.1)
+            self.affine1 = nn.Parameter(torch.Tensor(self.mem_dim, self.mem_dim))
+            self.affine2 = nn.Parameter(torch.Tensor(self.mem_dim, self.mem_dim))
             self.classifier = nn.Linear(self.hidden_size*2, 3)
             self.criterion = nn.CrossEntropyLoss(weight=torch.tensor([0.14,0.46,0.4]))  #  twitter15[0.11, 0.59, 0.3] twitter17: [0.14,0.46,0.4]
 
@@ -539,9 +595,9 @@ class DASCO(nn.Module):
             predictions = torch.argmax(logits, dim=-1)  # [N]
 
             for cls in classes:
-                tp_mask = (predictions == cls) and (labels == cls)
-                fp_mask = (predictions == cls) and (labels != cls)
-                fn_mask = (predictions != cls) and (labels == cls)
+                tp_mask = (predictions == cls) & (labels == cls)
+                fp_mask = (predictions == cls) & (labels != cls)
+                fn_mask = (predictions != cls) & (labels == cls)
                 class_stats[cls]['tp'] += torch.sum(tp_mask).item() 
                 class_stats[cls]['fp'] += torch.sum(fp_mask).item() 
                 class_stats[cls]['fn'] += torch.sum(fn_mask).item()
@@ -555,6 +611,117 @@ class DASCO(nn.Module):
         else:
             loss_classify = loss_target.mean()
             loss_cls_cl = loss_classify +  self.hyper3 * loss_cl
+        
+        return loss_cls_cl, n_correct, n_pred, n_label, class_stats
+    
+    def masc_test(self, samples, no_its_and_itm, text_encoder_atts, pooled_output, gcn_inputs):
+        
+        loss_target = 0
+        classes = [0, 1, 2]
+        class_stats = {cls: {'tp': 0, 'fp': 0, 'fn': 0} for cls in classes}
+        n_correct = 0
+        n_pred = 0
+        n_label = 0
+        
+        for i in range(len(samples['aspects_mask'])):
+            aspect_mask = samples['aspects_mask'][i].unsqueeze(-1).repeat(1, 1, self.hidden_size)
+            aspect_outs = gcn_inputs[i].unsqueeze(0).repeat(aspect_mask.size(0),1, 1)*aspect_mask
+            gcn_i = gcn_inputs[i].unsqueeze(0).repeat(aspect_mask.size(0),1, 1)
+            aspect_scores, s_attn = self.attn(gcn_i, gcn_i, text_encoder_atts[i].unsqueeze(0).repeat(aspect_mask.size(0),1, 1), aspect_outs, aspect_mask)
+            aspect_score_list = [attn_adj.squeeze(1) for attn_adj in torch.split(aspect_scores, 1, dim=1)]
+            attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(s_attn, 1, dim=1)]
+
+            adj_ag = None
+            aspect_score_avg = None
+            adj_s = None
+
+            # Average Aspect-aware Attention scores
+            for j in range(self.attention_heads):
+                if aspect_score_avg is None:
+                    aspect_score_avg = aspect_score_list[j]
+                else:
+                    aspect_score_avg += aspect_score_list[j]
+            aspect_score_avg = aspect_score_avg / self.attention_heads
+
+            # * Average Multi-head Attention matrices
+            for j in range(self.attention_heads):
+                if adj_s is None:
+                    adj_s = attn_adj_list[j]
+                else:
+                    adj_s += attn_adj_list[j]
+            adj_s = adj_s / self.attention_heads
+
+            for j in range(adj_s.size(0)):
+                adj_s[j] -= torch.diag(torch.diag(adj_s[j]))
+                adj_s[j] += torch.eye(adj_s[j].size(0)).cuda()  # self-loop
+            adj_s = text_encoder_atts[i].unsqueeze(0).repeat(samples['aspects_mask'][i].size(0), 1, 1).transpose(1, 2) * adj_s
+
+            # distance based weighted matrix
+            adj_reshape = torch.exp((-1.0) * 0.8 * samples['adj_matrix'][i].unsqueeze(0).repeat(samples['aspects_mask'][i].size(0), 1, 1))
+
+            # aspect-aware attention * distance based weighted matrix
+            distance_mask = (aspect_score_avg > torch.ones_like(aspect_score_avg) * 0.3)
+            adj_reshape = adj_reshape.masked_fill(distance_mask, 1).cuda()
+            adj_ag = (adj_reshape * aspect_score_avg).type(torch.float32)
+
+            # KL divergence
+            kl_loss = F.kl_div(adj_ag.softmax(-1).log(), adj_s.softmax(-1), reduction='sum')
+            kl_loss = torch.exp((-1.0) * kl_loss * 1.5)
+
+            # gcn layer
+            denom_s = adj_s.sum(2).unsqueeze(2) + 1
+            denom_ag = adj_ag.sum(2).unsqueeze(2) + 1
+            outputs_s = gcn_i
+            outputs_ag = gcn_i
+
+            for l in range(self.layers):
+                Ax_ag = adj_ag.bmm(outputs_ag)
+                AxW_ag = self.semW[l](Ax_ag)
+                AxW_ag = AxW_ag / denom_ag
+                gAxW_ag = F.relu(AxW_ag)
+
+                Ax_s = adj_s.bmm(outputs_s)
+                AxW_s = self.depW[l](Ax_s)
+                AxW_s = AxW_s / denom_s
+                gAxW_s = F.relu(AxW_s)
+
+                # * mutual Biaffine module
+                A1 = F.softmax(torch.bmm(torch.matmul(gAxW_ag, self.affine1), torch.transpose(gAxW_s, 1, 2)), dim=-1)
+                A2 = F.softmax(torch.bmm(torch.matmul(gAxW_s, self.affine2), torch.transpose(gAxW_ag, 1, 2)), dim=-1)
+                gAxW_ag, gAxW_s = torch.bmm(A1, gAxW_s), torch.bmm(A2, gAxW_ag)
+                outputs_ag = self.gcn_drop(gAxW_ag) if l < self.layers - 1 else gAxW_ag
+                outputs_s = self.gcn_drop(gAxW_s) if l < self.layers - 1 else gAxW_s
+
+            asp_wn_ori = samples['aspects_mask'][i].sum(dim=-1).unsqueeze(-1) # [N,1]
+            n_mask_ori = samples['aspects_mask'][i].unsqueeze(-1).repeat(1, 1, self.hidden_size // 2)  # [N,S,D/2]
+            outputs1 = (outputs_ag * n_mask_ori).sum(dim=1) / asp_wn_ori
+            outputs2 = (outputs_s * n_mask_ori).sum(dim=1) / asp_wn_ori
+
+            # 合并三个输出
+            final_outputs = torch.cat((outputs1, outputs2, pooled_output[i].repeat(outputs2.size(0), 1)), dim=-1)
+            logits = self.classifier(final_outputs)  # [N, 3]
+            loss_target += self.criterion(logits, samples['aspect_targets'][i].expand(logits.size(0)))
+            
+            labels = samples['aspect_targets'][i]
+            predictions = torch.argmax(logits, dim=-1)  # [N]
+
+            for cls in classes:
+                tp_mask = (predictions == cls) & (labels == cls)
+                fp_mask = (predictions == cls) & (labels != cls)
+                fn_mask = (predictions != cls) & (labels == cls)
+                class_stats[cls]['tp'] += torch.sum(tp_mask).item() 
+                class_stats[cls]['fp'] += torch.sum(fp_mask).item() 
+                class_stats[cls]['fn'] += torch.sum(fn_mask).item()
+
+            n_correct += torch.sum(predictions == labels).item()
+            n_pred += samples['aspects_mask'][i].size(0)
+            n_label += samples['aspects_mask'][i].size(0)
+        
+        if no_its_and_itm:
+            loss_cls_cl = 0
+        else:
+            loss_classify = loss_target.mean()
+            loss_cls_cl = loss_classify +  self.hyper3 * kl_loss
         
         return loss_cls_cl, n_correct, n_pred, n_label, class_stats
     
@@ -575,15 +742,17 @@ class DASCO(nn.Module):
         gcn_inputs = sequence_output
         pooled_output = self.pooled_drop(pooled_output)
         text_encoder_atts = text_encoder_atts.unsqueeze(-2)
-        attn_tensor = self.attn(gcn_inputs, gcn_inputs, text_encoder_atts)
-        attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(attn_tensor, 1, dim=1)]
+        # aspect_scores, attn_tensor = self.attn(gcn_inputs, gcn_inputs, text_encoder_atts)
+        # attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(attn_tensor, 1, dim=1)]
+        # aspect_score_list = [attn_adj.squeeze(1) for attn_adj in torch.split(aspect_scores, 1, dim=1)]
 
         if self.task == "MATE":
             loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.mate_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
             new_batch = None
             false_num = 0
         elif self.task == "MASC":
-            loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
+            # loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
+            loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_test(samples, no_its_and_itm, text_encoder_atts, pooled_output, gcn_inputs)
             new_batch = None
             false_num = 0
         elif self.task == "MABSA":
