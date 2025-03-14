@@ -76,59 +76,113 @@ class MultiHeadAttention(nn.Module):
                              for l, x in zip(self.linears, (query, key))]
         attn = attention(query, key, mask=mask, dropout=self.dropout)
         return attn
-    
-class MultiHeadAttention1(nn.Module):
 
-    def __init__(self, h, d_model, dropout=0.1):
-        super(MultiHeadAttention1, self).__init__()
-        assert d_model % h == 0
-        self.d_k = d_model // h
-        self.h = h
-        self.linears = clones(nn.Linear(d_model, d_model), 2)
-        self.dropout = nn.Dropout(p=dropout)
-        self.d_model = d_model
-        self.weight_m = nn.Parameter(torch.Tensor(self.h, self.d_k, self.d_k))
-        self.query = nn.Linear(self.d_model, self.d_model, bias=False)
-        self.bias = nn.Parameter(torch.Tensor(1))
-        self.dense = nn.Linear(d_model, self.d_k)
-    
-    def attention(self, query, key, mask, dropout):
-        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.d_k)
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e4)
+class DynamicLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers=1, bias=True, batch_first=True, dropout=0,
+                 bidirectional=False, only_use_last_hidden_state=False, rnn_type = 'LSTM'):
+        """
+        LSTM which can hold variable length sequence, use like TensorFlow's RNN(input, length...).
 
-        s_attn = F.softmax(scores, dim=-1)
-        if dropout is not None:
-            s_attn = dropout(s_attn)
-
-        return s_attn
-    
-    def aspect_attention(self, key, aspect, aspect_mask):
-        aspect = self.query(aspect)
-        new_aspect_shape = aspect.shape[:2] + (self.h, self.d_k,)
-        aspect = aspect.view(new_aspect_shape)
-        aspect = aspect.permute(0, 2, 1, 3)
-
-        aspect_raw_scores = torch.matmul(aspect, key.transpose(-2, -1))
-        aspect_mask = aspect_mask[:,:,0].unsqueeze(1).unsqueeze(-1).repeat(1, self.h, 1, 1)
-        aspect_raw_scores = (aspect_raw_scores + self.bias) * aspect_mask
-        aspect_scores = torch.sigmoid(aspect_raw_scores)
+        :param input_size:The number of expected features in the input x
+        :param hidden_size:The number of features in the hidden state h
+        :param num_layers:Number of recurrent layers.
+        :param bias:If False, then the layer does not use bias weights b_ih and b_hh. Default: True
+        :param batch_first:If True, then the input and output tensors are provided as (batch, seq, feature)
+        :param dropout:If non-zero, introduces a dropout layer on the outputs of each RNN layer except the last layer
+        :param bidirectional:If True, becomes a bidirectional RNN. Default: False
+        :param rnn_type: {LSTM, GRU, RNN}
+        """
+        super(DynamicLSTM, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bias = bias
+        self.batch_first = batch_first
+        self.dropout = dropout
+        self.bidirectional = bidirectional
+        self.only_use_last_hidden_state = only_use_last_hidden_state
+        self.rnn_type = rnn_type
         
-        return aspect_scores
-    
-    def forward(self, query, key, mask, aspect, aspect_mask):
-        mask = mask[:, :, :query.size(1)]
-        if mask is not None:
-            mask = mask.unsqueeze(1)
-        nbatches = query.size(0)
-        query, key = [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
-                      for l, x in zip(self.linears, (query, key))]
-        aspect_scores = None
-        aspect_scores = self.aspect_attention(key, aspect, aspect_mask)
-        self_attn = self.attention(query, key, mask, self.dropout)
+        if self.rnn_type == 'LSTM': 
+            self.RNN = nn.LSTM(
+                input_size=input_size, hidden_size=hidden_size, num_layers=num_layers,
+                bias=bias, batch_first=batch_first, dropout=dropout, bidirectional=bidirectional)  
+        elif self.rnn_type == 'GRU':
+            self.RNN = nn.GRU(
+                input_size=input_size, hidden_size=hidden_size, num_layers=num_layers,
+                bias=bias, batch_first=batch_first, dropout=dropout, bidirectional=bidirectional)
+        elif self.rnn_type == 'RNN':
+            self.RNN = nn.RNN(
+                input_size=input_size, hidden_size=hidden_size, num_layers=num_layers,
+                bias=bias, batch_first=batch_first, dropout=dropout, bidirectional=bidirectional)
+        
 
-        return aspect_scores, self_attn
+    def forward(self, x, x_len):
+        """
+        sequence -> sort -> pad and pack ->process using RNN -> unpack ->unsort
 
+        :param x: sequence embedding vectors
+        :param x_len: numpy/tensor list
+        :return:
+        """
+        """sort"""
+        x_sort_idx = torch.sort(-x_len)[1].long()
+        x_unsort_idx = torch.sort(x_sort_idx)[1].long()
+        x_len = x_len[x_sort_idx]
+        x = x[x_sort_idx]
+        """pack"""
+        x_emb_p = torch.nn.utils.rnn.pack_padded_sequence(x, x_len, batch_first=self.batch_first)
+        
+        # process using the selected RNN
+        if self.rnn_type == 'LSTM': 
+            out_pack, (ht, ct) = self.RNN(x_emb_p, None)
+        else: 
+            out_pack, ht = self.RNN(x_emb_p, None)
+            ct = None
+        """unsort: h"""
+        ht = torch.transpose(ht, 0, 1)[
+            x_unsort_idx]  # (num_layers * num_directions, batch, hidden_size) -> (batch, ...)
+        ht = torch.transpose(ht, 0, 1)
+
+        if self.only_use_last_hidden_state:
+            return ht
+        else:
+            """unpack: out"""
+            out = torch.nn.utils.rnn.pad_packed_sequence(out_pack, batch_first=self.batch_first)  # (sequence, lengths)
+            out = out[0]  #
+            out = out[x_unsort_idx]
+            """unsort: out c"""
+            if self.rnn_type =='LSTM':
+                ct = torch.transpose(ct, 0, 1)[
+                    x_unsort_idx]  # (num_layers * num_directions, batch, hidden_size) -> (batch, ...)
+                ct = torch.transpose(ct, 0, 1)
+
+            return out, (ht, ct)
+
+class GraphConvolution(nn.Module):
+    """
+    Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
+    """
+    def __init__(self, in_features, out_features, bias=True):
+        super(GraphConvolution, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features))
+        if bias:
+            self.bias = nn.Parameter(torch.FloatTensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+
+    def forward(self, text, adj):
+        hidden = torch.matmul(text, self.weight)
+        denom = torch.sum(adj, dim=2, keepdim=True) + 1
+        output = torch.mul(adj, hidden) / denom
+        if self.bias is not None:
+            output = output + self.bias
+        else:
+            output = output
+        return output
+        
 class DASCO(nn.Module):
     def __init__(self, args, MFSUIE_config):
         super().__init__()
@@ -154,19 +208,22 @@ class DASCO(nn.Module):
 
         self.attention_heads = 1
         self.mem_dim = self.hidden_size // 2
-        # self.attn = MultiHeadAttention(self.attention_heads, self.hidden_size)
-        self.attn = MultiHeadAttention1(self.attention_heads, self.hidden_size)
+        self.attn = MultiHeadAttention(self.attention_heads, self.hidden_size)
         self.layernorm = LayerNorm(self.hidden_size)
         self.pooled_drop = nn.Dropout(0.3)
-        
+        # self.text_lstm = DynamicLSTM(self.hidden_size, self.hidden_size, num_layers=1, batch_first=True, bidirectional=True)
         # 双路GCN
         self.depW = nn.ModuleList() # DepGCN依存句法GCN
         for layer in range(self.layers):
+            # input_dim = 2*self.hidden_size if layer == 0 else self.mem_dim
+            # self.depW.append(GraphConvolution(input_dim, self.mem_dim))
             input_dim = text_hidden_size if layer == 0 else self.mem_dim
             self.depW.append(nn.Linear(input_dim, self.mem_dim))
             
         self.semW = nn.ModuleList()  # SemGCN语义GCN
         for j in range(self.layers):
+            # input_dim = 2*self.hidden_size if j == 0 else self.mem_dim
+            # self.semW.append(GraphConvolution(input_dim, self.mem_dim))
             input_dim = text_hidden_size if j == 0 else self.mem_dim
             self.semW.append(nn.Linear(input_dim, self.mem_dim))
         
@@ -179,9 +236,6 @@ class DASCO(nn.Module):
             self.classifier = nn.Linear(self.hidden_size*2, 2)
             self.criterion = nn.CrossEntropyLoss()
         elif self.task == 'MASC':
-            self.gcn_drop = nn.Dropout(0.1)
-            self.affine1 = nn.Parameter(torch.Tensor(self.mem_dim, self.mem_dim))
-            self.affine2 = nn.Parameter(torch.Tensor(self.mem_dim, self.mem_dim))
             self.classifier = nn.Linear(self.hidden_size*2, 3)
             self.criterion = nn.CrossEntropyLoss(weight=torch.tensor([0.14,0.46,0.4]))  #  twitter15[0.11, 0.59, 0.3] twitter17: [0.14,0.46,0.4]
 
@@ -266,7 +320,7 @@ class DASCO(nn.Module):
                     (weighted_between_sim.sum(2) - weighted_between_sim.diagonal(dim1=-2, dim2=-1))  # 3
                 alle = m_refl_sim.sum(2) + m_between_sim.sum(2) - m_refl_sim.diagonal(dim1=-2, dim2=-1)
                 cl_logit = pos / alle
-                
+
                 batch_results.append(-torch.log(cl_logit))
             
             batch_results = torch.stack(batch_results, dim=0).mean(dim=0)
@@ -528,7 +582,7 @@ class DASCO(nn.Module):
             adj_ag_modified.append(temp)
         adj_ag = torch.stack(adj_ag_modified)
         adj_ag = text_encoder_atts.transpose(1, 2) * adj_ag
-        
+
         H_l = gcn_inputs
         si = nn.Sigmoid()
         relu = nn.ReLU()
@@ -614,95 +668,103 @@ class DASCO(nn.Module):
         
         return loss_cls_cl, n_correct, n_pred, n_label, class_stats
     
-    def masc_test(self, samples, no_its_and_itm, text_encoder_atts, pooled_output, gcn_inputs):
-        
+    def position_weight(self, x, text_len, aspect_len):
+        batch_size, seq_len, hidden_size = x.shape
+        text_len = text_len.cpu().numpy()
+        aspect_len = aspect_len.cpu().numpy()
+        weight = [
+                    [
+                        [aspect_len[i][j % len(aspect_len[i])] / text_len[i] if text_len[i] > 0 else 0 for _ in range(hidden_size)] 
+                    for j in range(seq_len)] 
+                for i in range(batch_size)]
+        weight = torch.tensor(weight, dtype=torch.float).to(x.device)
+        output = weight*x  # B, text_len, hidden_size*2
+        return output
+    
+    def masc_test(self, samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs):
+        text_len = torch.full((len(text_encoder_atts),), 512, dtype=torch.int64)
+        from torch.nn.utils.rnn import pad_sequence
+        aspects_scope_tensors = [batch.clone().detach().to(torch.int) for batch in samples['aspects_scope']]
+        padded_aspects_scope = pad_sequence(aspects_scope_tensors, batch_first=True, padding_value=0)
+        aspect_len = torch.sum(padded_aspects_scope.ne(0), dim=-1)
+
+        adj_ag = None
+
+        # Attention matrix
+        for i in range(self.attention_heads):
+            if adj_ag is None:
+                adj_ag = attn_adj_list[i].clone()
+            else:
+                adj_ag = adj_ag + attn_adj_list[i]
+        adj_ag = adj_ag / self.attention_heads
+
+        # 去除邻接矩阵的对角线元素，并添加自环，最后与文本编码器的注意力矩阵进行元素相乘。
+        adj_ag_modified = []
+        for j in range(adj_ag.size(0)):
+            temp = adj_ag[j] - torch.diag(torch.diag(adj_ag[j]))
+            temp = temp + torch.eye(temp.size(0), device=adj_ag.device)
+            adj_ag_modified.append(temp)
+        adj_ag = torch.stack(adj_ag_modified)
+        adj_ag = text_encoder_atts.transpose(1, 2) * adj_ag
+
+        sem_input = gcn_inputs  # B, seq_len, hidden_size 4,512,768
+        dep_input = gcn_inputs
+        text_out, (_, _) = self.text_lstm(sem_input, text_len.cpu().to(torch.int64))  # B, text_len, hidden_size*2 4,512,1536
+        adj_ag_t = adj_ag
+        dep_out, (_, _) = self.text_lstm(dep_input, text_len.cpu().to(torch.int64))
+        adj_dep = samples['adj_matrix']
+
+        for l in range(self.layers):
+            # **********GCN*********
+            seq_len = text_out.shape[1]
+            adj_ag_t = adj_ag_t[:, :seq_len, :self.mem_dim]
+            sem = self.position_weight(text_out, text_len, aspect_len)
+            text_out = F.relu(self.semW[l](sem, adj_ag_t)) #SemGCN
+            seq_len = dep_out.shape[1]
+            adj_dep_t = adj_dep[:, :seq_len, :self.mem_dim]
+            dep = self.position_weight(dep_out, text_len, aspect_len)
+            dep_out = F.relu(self.depW[l](dep, adj_dep_t)) #depGCN
+        # span-masked graphCL
+        h1 = self.projection(text_out)
+        h2 = self.projection(dep_out)  #[B,s,D/2]
+        if no_its_and_itm:
+            loss_cl = 0
+        else:
+            l1 = self.scope_semi_loss_list(h1, h2, samples['aspects_scope'], samples['aspects_mask'])
+            l2 = self.scope_semi_loss_list(h2, h1, samples['aspects_scope'], samples['aspects_mask'])  # B, Seq
+            loss = (l1 + l2) * 0.5
+            loss_avg = loss.mean(dim=1, keepdim=True)
+            loss_cl = loss_avg.mean()
+
         loss_target = 0
         classes = [0, 1, 2]
         class_stats = {cls: {'tp': 0, 'fp': 0, 'fn': 0} for cls in classes}
         n_correct = 0
         n_pred = 0
         n_label = 0
-        
+
         for i in range(len(samples['aspects_mask'])):
-            aspect_mask = samples['aspects_mask'][i].unsqueeze(-1).repeat(1, 1, self.hidden_size)
-            aspect_outs = gcn_inputs[i].unsqueeze(0).repeat(aspect_mask.size(0),1, 1)*aspect_mask
-            gcn_i = gcn_inputs[i].unsqueeze(0).repeat(aspect_mask.size(0),1, 1)
-            aspect_scores, s_attn = self.attn(gcn_i, gcn_i, text_encoder_atts[i].unsqueeze(0).repeat(aspect_mask.size(0),1, 1), aspect_outs, aspect_mask)
-            aspect_score_list = [attn_adj.squeeze(1) for attn_adj in torch.split(aspect_scores, 1, dim=1)]
-            attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(s_attn, 1, dim=1)]
-
-            adj_ag = None
-            aspect_score_avg = None
-            adj_s = None
-
-            # Average Aspect-aware Attention scores
-            for j in range(self.attention_heads):
-                if aspect_score_avg is None:
-                    aspect_score_avg = aspect_score_list[j]
-                else:
-                    aspect_score_avg += aspect_score_list[j]
-            aspect_score_avg = aspect_score_avg / self.attention_heads
-
-            # * Average Multi-head Attention matrices
-            for j in range(self.attention_heads):
-                if adj_s is None:
-                    adj_s = attn_adj_list[j]
-                else:
-                    adj_s += attn_adj_list[j]
-            adj_s = adj_s / self.attention_heads
-
-            for j in range(adj_s.size(0)):
-                adj_s[j] -= torch.diag(torch.diag(adj_s[j]))
-                adj_s[j] += torch.eye(adj_s[j].size(0)).cuda()  # self-loop
-            adj_s = text_encoder_atts[i].unsqueeze(0).repeat(samples['aspects_mask'][i].size(0), 1, 1).transpose(1, 2) * adj_s
-
-            # distance based weighted matrix
-            adj_reshape = torch.exp((-1.0) * 0.8 * samples['adj_matrix'][i].unsqueeze(0).repeat(samples['aspects_mask'][i].size(0), 1, 1))
-
-            # aspect-aware attention * distance based weighted matrix
-            distance_mask = (aspect_score_avg > torch.ones_like(aspect_score_avg) * 0.3)
-            adj_reshape = adj_reshape.masked_fill(distance_mask, 1).cuda()
-            adj_ag = (adj_reshape * aspect_score_avg).type(torch.float32)
-
-            # KL divergence
-            kl_loss = F.kl_div(adj_ag.softmax(-1).log(), adj_s.softmax(-1), reduction='sum')
-            kl_loss = torch.exp((-1.0) * kl_loss * 1.5)
-
-            # gcn layer
-            denom_s = adj_s.sum(2).unsqueeze(2) + 1
-            denom_ag = adj_ag.sum(2).unsqueeze(2) + 1
-            outputs_s = gcn_i
-            outputs_ag = gcn_i
-
-            for l in range(self.layers):
-                Ax_ag = adj_ag.bmm(outputs_ag)
-                AxW_ag = self.semW[l](Ax_ag)
-                AxW_ag = AxW_ag / denom_ag
-                gAxW_ag = F.relu(AxW_ag)
-
-                Ax_s = adj_s.bmm(outputs_s)
-                AxW_s = self.depW[l](Ax_s)
-                AxW_s = AxW_s / denom_s
-                gAxW_s = F.relu(AxW_s)
-
-                # * mutual Biaffine module
-                A1 = F.softmax(torch.bmm(torch.matmul(gAxW_ag, self.affine1), torch.transpose(gAxW_s, 1, 2)), dim=-1)
-                A2 = F.softmax(torch.bmm(torch.matmul(gAxW_s, self.affine2), torch.transpose(gAxW_ag, 1, 2)), dim=-1)
-                gAxW_ag, gAxW_s = torch.bmm(A1, gAxW_s), torch.bmm(A2, gAxW_ag)
-                outputs_ag = self.gcn_drop(gAxW_ag) if l < self.layers - 1 else gAxW_ag
-                outputs_s = self.gcn_drop(gAxW_s) if l < self.layers - 1 else gAxW_s
-
-            asp_wn_ori = samples['aspects_mask'][i].sum(dim=-1).unsqueeze(-1) # [N,1]
-            n_mask_ori = samples['aspects_mask'][i].unsqueeze(-1).repeat(1, 1, self.hidden_size // 2)  # [N,S,D/2]
-            outputs1 = (outputs_ag * n_mask_ori).sum(dim=1) / asp_wn_ori
-            outputs2 = (outputs_s * n_mask_ori).sum(dim=1) / asp_wn_ori
-
-            # 合并三个输出
-            final_outputs = torch.cat((outputs1, outputs2, pooled_output[i].repeat(outputs2.size(0), 1)), dim=-1)
-            logits = self.classifier(final_outputs)  # [N, 3]
-            loss_target += self.criterion(logits, samples['aspect_targets'][i].expand(logits.size(0)))
+            asp_wn_ori = samples['aspects_mask'][i].sum(dim=-1).unsqueeze(-1).to(h1.device) # [N,1]
+            asp_wn_ori = torch.clamp(asp_wn_ori, min=1.0)
+            n_mask_ori = samples['aspects_mask'][i].unsqueeze(-1).repeat(1, 1, self.hidden_size // 2).to(h1.device)  # [N,S,D/2]
             
-            labels = samples['aspect_targets'][i]
+            h1_expanded = h1[i].unsqueeze(0)  # [1, S, D/2]
+            h2_expanded = h2[i].unsqueeze(0)  # [1, S, D/2]
+            masked_h1 = h1_expanded * n_mask_ori  # [N, S, D/2]
+            masked_h2 = h2_expanded * n_mask_ori  # [N, S, D/2]
+            summed_h1 = masked_h1.sum(dim=1)  # [N, D/2]   
+            summed_h2 = masked_h2.sum(dim=1)  # [N, D/2]
+            outputs1 = summed_h1 / asp_wn_ori  # [N, D/2]
+            outputs2 = summed_h2 / asp_wn_ori  # [N, D/2]
+            outputs1 = nn.functional.normalize(outputs1,  p=2, dim=-1)  # L2归一化 
+            outputs2 = nn.functional.normalize(outputs2,  p=2, dim=-1)
+            pooled_output_normalized = nn.functional.normalize(pooled_output[i],  p=2, dim=-1)
+            # 合并三个输出
+            final_outputs = torch.cat((outputs1, outputs2, pooled_output_normalized.repeat(outputs2.size(0), 1)), dim=-1)
+            logits = self.classifier(final_outputs)  # [N, 3]
+            loss_target += self.criterion(logits, samples['aspect_targets'][i].to(h1.device))
+            
+            labels = samples['aspect_targets'][i].to(h1.device)
             predictions = torch.argmax(logits, dim=-1)  # [N]
 
             for cls in classes:
@@ -721,7 +783,7 @@ class DASCO(nn.Module):
             loss_cls_cl = 0
         else:
             loss_classify = loss_target.mean()
-            loss_cls_cl = loss_classify +  self.hyper3 * kl_loss
+            loss_cls_cl = loss_classify +  self.hyper3 * loss_cl
         
         return loss_cls_cl, n_correct, n_pred, n_label, class_stats
     
@@ -742,17 +804,15 @@ class DASCO(nn.Module):
         gcn_inputs = sequence_output
         pooled_output = self.pooled_drop(pooled_output)
         text_encoder_atts = text_encoder_atts.unsqueeze(-2)
-        # aspect_scores, attn_tensor = self.attn(gcn_inputs, gcn_inputs, text_encoder_atts)
-        # attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(attn_tensor, 1, dim=1)]
-        # aspect_score_list = [attn_adj.squeeze(1) for attn_adj in torch.split(aspect_scores, 1, dim=1)]
+        attn_tensor = self.attn(gcn_inputs, gcn_inputs, text_encoder_atts)
+        attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(attn_tensor, 1, dim=1)]
 
         if self.task == "MATE":
             loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.mate_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
             new_batch = None
             false_num = 0
         elif self.task == "MASC":
-            # loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
-            loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_test(samples, no_its_and_itm, text_encoder_atts, pooled_output, gcn_inputs)
+            loss_cls_cl, n_correct, n_pred, n_label, class_stats = self.masc_cl_loss(samples, no_its_and_itm, attn_adj_list, text_encoder_atts, pooled_output, gcn_inputs)
             new_batch = None
             false_num = 0
         elif self.task == "MABSA":

@@ -163,7 +163,7 @@ def inputs_to_tree_reps(maxlen, head, words, l):
 
 # 解析包含情感分析标注的JSON文件
 def ParseData(data, max_seq_len, left_len):
-    polar_dict = {'POS':2, 'NEU':1, 'NEG':0}  # 情感标签映射
+    polar_dict = {'POS':0, 'NEU':1, 'NEG':2}  # 情感标签映射 2 1 0
 
     d = data['parse_info']
     text_list = list(d['token'])
@@ -187,10 +187,11 @@ def ParseData(data, max_seq_len, left_len):
     for aspect in d['aspects']:
         asp = str(aspect['term']).lower()
         polarity = str(aspect['polarity']).strip().upper()
-        try:    
-            label = polar_dict[polarity]
-        except:
-            label = 1 # the only one bad data
+        label = polar_dict[polarity]
+        # try:    
+        #     label = polar_dict[polarity]
+        # except:
+        #     label = 1 # the only one bad data
 
         aspect_post = [int(aspect['from']), int(aspect['to'])]
         id_b, id_e = aspect_post
@@ -329,16 +330,25 @@ class twitter_dataset(Dataset):
                 "input_ids":scene_graph["input_ids"],
                 "attention_mask":scene_graph["attention_mask"]
         }
-
-        IE_inputs = self.IE_tokenizer(
-            text=self.data[index]["query_input"],  # prompt + text_input
-            text_pair=self.data[index]["text_input"].replace(" ###",","),
-            padding="max_length",
-            truncation=True,
-            max_length=(self.max_seq_len-self.num_query_token),
-            add_special_tokens=True,
-            #return_offsets_mapping=True
-        )
+        if self.task == 'MATE' or self.task == 'MABSA':
+            IE_inputs = self.IE_tokenizer(
+                text=self.data[index]["query_input"],  # prompt + text_input
+                text_pair=self.data[index]["text_input"].replace(" ###",","),
+                padding="max_length",
+                truncation=True,
+                max_length=(self.max_seq_len-self.num_query_token),
+                add_special_tokens=True,
+                #return_offsets_mapping=True
+            )
+        elif self.task == 'MASC':
+            IE_inputs = self.IE_tokenizer(
+                text='Classify the sentiment polarity of aspect terms',  # prompt + text_input
+                text_pair=self.data[index]["text_input"].replace(" ###",","),
+                padding="max_length",
+                truncation=True,
+                max_length=(self.max_seq_len-self.num_query_token),
+                add_special_tokens=True,
+            )
         # pdb.set_trace()
         IE_inputs["input_ids"]=[self.SEP_token_id if x == self.split_token_id else x for x in IE_inputs["input_ids"]]
         
