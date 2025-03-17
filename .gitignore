@@ -172,3 +172,7 @@ cython_debug/
 
 checkpoints/
 Text_encoder/model_best/
+savelayers.py
+pretrain_dataset.py
+pretrain_model.py
+pretrain.py

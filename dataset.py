@@ -163,7 +163,7 @@ def inputs_to_tree_reps(maxlen, head, words, l):
 
 # 解析包含情感分析标注的JSON文件
 def ParseData(data, max_seq_len, left_len):
-    polar_dict = {'POS':0, 'NEU':1, 'NEG':2}  # 情感标签映射 2 1 0
+    polar_dict = {'POS':0, 'NEU':1, 'NEG':2}  # 情感标签映射
 
     d = data['parse_info']
     text_list = list(d['token'])
@@ -187,11 +187,10 @@ def ParseData(data, max_seq_len, left_len):
     for aspect in d['aspects']:
         asp = str(aspect['term']).lower()
         polarity = str(aspect['polarity']).strip().upper()
-        label = polar_dict[polarity]
-        # try:    
-        #     label = polar_dict[polarity]
-        # except:
-        #     label = 1 # the only one bad data
+        try:    
+            label = polar_dict[polarity]
+        except:
+            label = 1 # the only one bad data in twitter15 trainset
 
         aspect_post = [int(aspect['from']), int(aspect['to'])]
         id_b, id_e = aspect_post

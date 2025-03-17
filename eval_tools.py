@@ -39,7 +39,7 @@ def eval_MATE(model,dataloader,device='cpu'):
     model.eval()
     total_correct = 0
     total_label = 0
-    total_pred=0
+    total_pred = 0
 
     with torch.no_grad():
         for batch in tqdm(dataloader,desc="evaluating model"):
@@ -68,7 +68,7 @@ def eval_MASC(model,dataloader,device='cpu'):
     model.eval()
     total_correct = 0
     total_label = 0
-    total_pred=0
+    total_pred = 0
     classes = [0, 1, 2]
     merged = {cls: {'tp': 0, 'fp': 0, 'fn': 0} for cls in classes}
 
@@ -139,11 +139,13 @@ def eval_MABSA(MATE_model,MASC_model,dataloader,device='cpu'):
                 output = MATE_model(batch,no_its_and_itm=True)
                 # print(output.n_correct,output.n_pred,output.n_label)
                 new_batch = output.new_batch
+                false_batch = output.false_batch
         with maybe_autocast(MASC_model):
             with torch.no_grad():      
                 masc_output = MASC_model(new_batch,no_its_and_itm=True)
+                false_output = MASC_model(false_batch,no_its_and_itm=True)
 
-        total_correct += masc_output.n_correct - output.false_num
+        total_correct += (masc_output.n_correct - false_output.n_correct)
         total_pred += output.n_pred
         total_label += output.n_label
 
@@ -167,9 +169,9 @@ if __name__=="__main__":
     parser.add_argument('--task', type=str, default=None)
     parser.add_argument('--device', type=str, default="cuda:0")
     parser.add_argument('--hyper1', type=float, default=0.2)
-    parser.add_argument('--hyper2', type=float, default=0.12)
+    parser.add_argument('--hyper2', type=float, default=0.2)
     parser.add_argument('--hyper3', type=float, default=0.2)
-    parser.add_argument('--gcn_layers', type=int, default=3)
+    parser.add_argument('--gcn_layers', type=int, default=4)
 
     args = parser.parse_args()
     IE_tokenizer = BertTokenizer.from_pretrained(args.base_model)
@@ -216,7 +218,6 @@ if __name__=="__main__":
 
     if args.task== "MABSA":
         MATE_model = from_pretrained(args.MATE_model, args)
-        args.gcn_layers=4
         args.task= "MASC"
         MASC_model = from_pretrained(args.MASC_model, args)
         c, l, p = eval_MABSA(MATE_model, MASC_model, eval_dataloader, device=device)

@@ -6,7 +6,7 @@ accelerate launch --config_file deepspeed_ddp.json MATE_finetune.py \
     --base_model ./Text_encoder/model_best \
     --pretrain_model ./checkpoints/pretrain_ckp/MATE_best_model.pt \
     --train_ds /home/data/finetune_dataset/twitter17/train \
-    --eval_ds /home/data/finetune_dataset/twitter17/test \
+    --eval_ds /home/data/finetune_dataset/twitter17/dev \
     --hyper1 0.2 \
     --hyper2 0.2 \
     --hyper3 0.2 \

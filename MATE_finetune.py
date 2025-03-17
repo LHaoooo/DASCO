@@ -222,10 +222,10 @@ if __name__ == "__main__":
     model.lm_weight=args.lm
     model.cl_weight=args.cl
 
-    # for param in model.pdq.parameters():
-    #     param.requires_grad=False
-    # for param in model.text_encoder.parameters():
-    #     param.requires_grad=False
+    for param in model.pdq.parameters():
+        param.requires_grad=False
+    for param in model.text_encoder.parameters():
+        param.requires_grad=False
 
     optimizer = AdamW(params=filter(lambda p: p.requires_grad, model.parameters()),
                 lr=args.lr, betas=(0.9, 0.98), weight_decay=0.05)
